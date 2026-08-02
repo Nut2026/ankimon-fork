@@ -119,7 +119,6 @@
 		var sprites_url = getUrlParameter('spritesUrl');
 		var bottomPokemonSprite = getUrlParameter('bottomPokemonSprite');
 		var topPokemonSprite = getUrlParameter('topPokemonSprite');
-		var hideSprites = getUrlParameter('hideSprites') === '1';
 		//var topPokeUrl = `../sprites/back_default_gif/1.gif`;
 		var text = getUrlParameter('text');
 		var levelTop = getUrlParameter('levelTop');
@@ -224,10 +223,8 @@
 		//}
 
 		// Update Pokémon images and font dynamically
-		if (!hideSprites) {
-			bottomPokemon.style.backgroundImage = 'url(' + bottomPokemonSprite + ')';
-			topPoke.style.backgroundImage = 'url(' + topPokemonSprite + ')';
-		}
+		bottomPokemon.style.backgroundImage = 'url(' + bottomPokemonSprite + ')';
+		topPoke.style.backgroundImage = 'url(' + topPokemonSprite + ')';
 
 		if (fontUrl) {
 			// fontUrl is written into a <style> element, whose textContent is
