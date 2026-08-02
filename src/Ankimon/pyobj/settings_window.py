@@ -399,6 +399,7 @@ class SettingsWindow(QMainWindow):
                     "Team Overview in Deck Overview",
                     "Animate Time",
                     "Show GIFs in Collection",
+                    "Show Sprites Across Ankimon",
                 ]
             },
             "HUD and Reviewer": {
