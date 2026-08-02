@@ -79,6 +79,15 @@ class EvoWindow(QWidget):
     def open_dynamic_window(self):
         self.show()
 
+    def _should_show_sprites(self) -> bool:
+        """Check if sprites should be shown based on the global setting."""
+        if self.settings_obj is None:
+            return True
+        try:
+            return self.settings_obj.get("gui.show_sprites_across_ankimon", True)
+        except Exception:
+            return True
+
     def display_evo_complete(self, prevo_id: int, evo_id: int):
         """
         Displays the GUI notification that the given Pokemon has evolved.
@@ -142,7 +151,11 @@ class EvoWindow(QWidget):
 
         # draw background to a specific pixel
         painter.drawPixmap(0, 0, pixmap_bckg)
-        painter.drawPixmap(125, 10, image_pixmap)
+        
+        # Only draw the Pokémon sprite if sprites are enabled
+        show_sprites = self._should_show_sprites()
+        if show_sprites:
+            painter.drawPixmap(125, 10, image_pixmap)
 
         # custom font
         custom_font = load_custom_font(20, int(self.settings_obj.get("misc.language")))
@@ -222,6 +235,9 @@ class EvoWindow(QWidget):
         prevo_name = return_name_for_id(prevo_id)
         evo_name = return_name_for_id(evo_id)
 
+        # Check if sprites should be shown
+        show_sprites = self._should_show_sprites()
+
         # Display the Pokémon image
         pkmnimage_path = frontdefault / f"{prevo_id}.png"
         pkmnimage_path2 = frontdefault / f"{(evo_id)}.png"
@@ -260,8 +276,12 @@ class EvoWindow(QWidget):
         # merge both images together
         painter = QPainter(merged_pixmap)
         painter.drawPixmap(0, 0, pixmap_bckg)
-        painter.drawPixmap(255, 70, pkmnpixmap)
-        painter.drawPixmap(255, 285, pkmnpixmap2)
+        
+        # Only draw Pokémon sprites if sprites are enabled
+        if show_sprites:
+            painter.drawPixmap(255, 70, pkmnpixmap)
+            painter.drawPixmap(255, 285, pkmnpixmap2)
+        
         # Draw the text on top of the image
         font = QFont()
         font.setPointSize(12)  # Adjust the font size as needed
