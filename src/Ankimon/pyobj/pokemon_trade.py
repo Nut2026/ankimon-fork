@@ -209,6 +209,16 @@ class PokemonTrade:
         self.pokedex_path = pokedex_path
         self.check_and_trade()
 
+    def _should_show_sprites(self) -> bool:
+        """Check if sprites should be shown based on the setting."""
+        try:
+            settings_obj = services.settings
+            if settings_obj is not None:
+                return settings_obj.get("gui.show_sprites_across_ankimon", True)
+            return True
+        except Exception:
+            return True
+
     def load_pokemon_data(self):
         """Load main pokemon data from database."""
         try:
@@ -260,25 +270,33 @@ class PokemonTrade:
         sprite_size = QSize(64, 64)
         your_pokemon_sprite_label.setMaximumSize(sprite_size)
         your_pokemon_sprite_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        your_pokemon_gif_path = get_sprite_path(side="front", sprite_type="gif", id=self.id, shiny=getattr(self, "shiny", False), gender=self.gender, pokemon_name=self.name)
         
-        your_pokemon_movie = QMovie(your_pokemon_gif_path)
-        def set_bw_frame():
-            frame = your_pokemon_movie.currentImage()
-            if not frame.isNull():
-                gray = QImage(frame.size(), QImage.Format.Format_ARGB32)
-                for y in range(frame.height()):
-                    for x in range(frame.width()):
-                        color = frame.pixelColor(x, y)
-                        alpha = color.alpha()
-                        gray_value = int(0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue())
-                        gray.setPixelColor(x, y, QColor(gray_value, gray_value, gray_value, alpha))
-                scaled = QPixmap.fromImage(gray).scaled(sprite_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                your_pokemon_sprite_label.setPixmap(scaled)
-        your_pokemon_movie.frameChanged.connect(lambda _: set_bw_frame())
-        your_pokemon_sprite_label.setMovie(your_pokemon_movie)
-        your_pokemon_movie.start()
-        set_bw_frame()
+        # Only load and display sprite if setting allows
+        show_sprites = self._should_show_sprites()
+        if show_sprites:
+            your_pokemon_gif_path = get_sprite_path(side="front", sprite_type="gif", id=self.id, shiny=getattr(self, "shiny", False), gender=self.gender, pokemon_name=self.name)
+            
+            your_pokemon_movie = QMovie(your_pokemon_gif_path)
+            def set_bw_frame():
+                frame = your_pokemon_movie.currentImage()
+                if not frame.isNull():
+                    gray = QImage(frame.size(), QImage.Format.Format_ARGB32)
+                    for y in range(frame.height()):
+                        for x in range(frame.width()):
+                            color = frame.pixelColor(x, y)
+                            alpha = color.alpha()
+                            gray_value = int(0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue())
+                            gray.setPixelColor(x, y, QColor(gray_value, gray_value, gray_value, alpha))
+                    scaled = QPixmap.fromImage(gray).scaled(sprite_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                    your_pokemon_sprite_label.setPixmap(scaled)
+            your_pokemon_movie.frameChanged.connect(lambda _: set_bw_frame())
+            your_pokemon_sprite_label.setMovie(your_pokemon_movie)
+            your_pokemon_movie.start()
+            set_bw_frame()
+        else:
+            # Display a placeholder when sprites are hidden - use a small generic icon or blank
+            your_pokemon_sprite_label.setPixmap(QPixmap(1, 1))  # Minimal placeholder
+        
         your_pokemon_name_label = QLabel(f"{self.name}")
         your_pokemon_name_label.setFont(QFont("Arial", 12))
         your_pokemon_layout.addWidget(your_pokemon_sprite_label)
@@ -294,7 +312,12 @@ class PokemonTrade:
         self.other_pokemon_sprite_label = QLabel()
         self.other_pokemon_sprite_label.setMaximumSize(sprite_size)
         self.other_pokemon_sprite_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.other_pokemon_sprite_label.setPixmap(QPixmap(":/icons/pokeball.png").scaled(sprite_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        
+        if show_sprites:
+            self.other_pokemon_sprite_label.setPixmap(QPixmap(":/icons/pokeball.png").scaled(sprite_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        else:
+            self.other_pokemon_sprite_label.setPixmap(QPixmap(1, 1))
+            
         self.other_pokemon_name_label = QLabel("")
         self.other_pokemon_name_label.setFont(QFont("Arial", 12))
         other_pokemon_layout.addWidget(self.other_pokemon_sprite_label)
@@ -497,6 +520,14 @@ class PokemonTrade:
         try:
             sprite_size = QSize(64, 64)
             self.other_pokemon_sprite_label.clear()
+            
+            # Only show sprites if the setting allows
+            show_sprites = self._should_show_sprites()
+            if not show_sprites:
+                self.other_pokemon_sprite_label.setPixmap(QPixmap(1, 1))
+                self.other_pokemon_name_label.setText("")
+                return
+            
             self.other_pokemon_sprite_label.setPixmap(QPixmap())
             self.other_pokemon_name_label.setText("")
             
@@ -535,7 +566,10 @@ class PokemonTrade:
                 self.other_pokemon_sprite_label.setPixmap(QPixmap(":/icons/pokeball.png").scaled(QSize(64, 64), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
                 self.other_pokemon_name_label.setText("")
         except Exception:
-            self.other_pokemon_sprite_label.setPixmap(QPixmap(":/icons/pokeball.png").scaled(QSize(64, 64), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            if self._should_show_sprites():
+                self.other_pokemon_sprite_label.setPixmap(QPixmap(":/icons/pokeball.png").scaled(QSize(64, 64), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            else:
+                self.other_pokemon_sprite_label.setPixmap(QPixmap(1, 1))
             self.other_pokemon_name_label.setText("")
 
     def get_pokemon_name_by_id(self, pokemon_id):
