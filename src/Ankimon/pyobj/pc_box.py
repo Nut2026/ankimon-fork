@@ -643,6 +643,9 @@ class PokemonPC(QDialog):
         self.n_rows = 6
         self.current_box_idx = 0  # Index of current displayed box
         self.gif_in_collection = settings.get("gui.gif_in_collection")
+        self.show_sprites_across_ankimon = settings.get(
+            "gui.show_sprites_across_ankimon", True
+        )
 
         self.slot_size = 75  # Side length in pixels of a PC slot
 
@@ -1291,7 +1294,10 @@ class PokemonPC(QDialog):
         # Pokéball Icon
         icon_label = QLabel()
         pixmap = QPixmap(str(icon_path))
-        if not pixmap.isNull():
+        if not self.settings.get("gui.show_sprites_across_ankimon", True):
+            # Keep the placeholder's visual spacing while omitting its Pokéball.
+            icon_label.setFixedSize(180, 180)
+        elif not pixmap.isNull():
             scaled_pixmap = pixmap.scaled(
                 180,
                 180,
@@ -1341,6 +1347,9 @@ class PokemonPC(QDialog):
         self._pokemon_cache = None  # Invalidate database cache
         clear_layout(self.pokemon_grid)
         self.gif_in_collection = self.settings.get("gui.gif_in_collection")
+        self.show_sprites_across_ankimon = self.settings.get(
+            "gui.show_sprites_across_ankimon", True
+        )
 
         # The day/night clock and badges are part of the friendship/time feature
         friendship_time_enabled = self.settings.get(
@@ -1448,7 +1457,7 @@ class PokemonPC(QDialog):
                     pokemon_button, row, col, alignment=Qt.AlignmentFlag.AlignCenter
                 )
 
-                if self.gif_in_collection:
+                if self.gif_in_collection and self.show_sprites_across_ankimon:
                     scaled_movie_label = ScaledMovieLabel(
                         pkmn_image_path,
                         self.slot_size - 10,
@@ -1464,7 +1473,7 @@ class PokemonPC(QDialog):
                         col,
                         alignment=Qt.AlignmentFlag.AlignCenter,
                     )
-                else:
+                elif self.show_sprites_across_ankimon:
                     pokemon_button.setIcon(QIcon(pkmn_image_path))
                     pokemon_button.setIconSize(
                         QSize(self.slot_size - 10, self.slot_size - 10)
@@ -2157,6 +2166,7 @@ class PokemonPC(QDialog):
             friendship_time_enabled=self.settings.get(
                 "evolution.friendship_time_enabled", True
             ),
+            show_sprites=self.settings.get("gui.show_sprites_across_ankimon", True),
         )
 
         self._last_pokemon_stats = current_stats
