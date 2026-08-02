@@ -22,7 +22,6 @@ from PyQt6.QtGui import QIcon, QColor
 from ..functions.badges_functions import get_achieved_badges
 
 from ..resources import icon_path, badges_path, badges_list_path
-from ..services import services
 
 class AchievementWindow(QWidget):
     def __init__(self):
@@ -94,8 +93,7 @@ class AchievementWindow(QWidget):
             picture_pixmap = QPixmap(str(badge_path))
             painter = QPainter(border_pixmap)
             painter.drawPixmap(2, 2, background_pixmap)
-            if services.settings is None or services.settings.get("gui.show_sprites_across_ankimon", True):
-                painter.drawPixmap(5, 5, picture_pixmap)
+            painter.drawPixmap(5,5, picture_pixmap)
             painter.end()  # Finish drawing
             picture_label = QLabel()
             picture_label.setPixmap(border_pixmap)
@@ -105,11 +103,7 @@ class AchievementWindow(QWidget):
             max_width, max_height = 100, 100  # Example maximum sizes
             scaled_pixmap = picture_pixmap.scaled(max_width, max_height, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             picture_label = QLabel()
-            if services.settings is not None and not services.settings.get("gui.show_sprites_across_ankimon", True):
-                # Preserve the badge slot's dimensions and hoverable frame.
-                picture_label.setFixedSize(max_width, max_height)
-            else:
-                picture_label.setPixmap(scaled_pixmap)
+            picture_label.setPixmap(scaled_pixmap)
         picture_label.setStyleSheet("border: 2px solid #3498db; border-radius: 5px; padding: 5px;")
         picture_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         frame.addWidget(picture_label)
