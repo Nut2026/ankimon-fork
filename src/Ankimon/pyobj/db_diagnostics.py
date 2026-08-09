@@ -144,7 +144,7 @@ def trigger_database_diagnostics():
                 parent=mw,
                 op=run_repair,
                 success=on_repair_done
-            ).with_backend_semantics().run_in_background()
+            ).without_collection().run_in_background()
 
     if "PYTEST_CURRENT_TEST" in os.environ:
         try:
@@ -158,4 +158,4 @@ def trigger_database_diagnostics():
             parent=mw,
             op=run_check,
             success=on_check_done
-        ).with_backend_semantics().run_in_background()
+        ).without_collection().run_in_background()

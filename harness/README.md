@@ -76,11 +76,15 @@ PC box).
 mode**. Nothing is drawn, but the real widgets/memory/PC box are all live, which
 is what makes real-Qt glitches and "crash after N encounters" reproducible.
 
-Base Tier 2 needs PyQt6 and native Qt libs. The setup is **sudo-free** (a venv
-with pip bootstrapped via get-pip.py, and the Qt `.deb`s *downloaded and
-extracted* into a local dir — nothing installed system-wide; `rm -rf .tier2`
-undoes it). These are harness-only dependencies and are never shipped in the
-`.ankiaddon`:
+Base Tier 2 needs PyQt6 and native Qt libs. Its setup scripts require a Linux
+userland because they use `apt-get`, `dpkg-deb`, Linux library paths, and `/proc`
+memory statistics. On Windows, run Tier 2 from **WSL**, not PowerShell or Git
+Bash; the checkout can remain on `C:` and be opened through `/mnt/c/...`.
+
+The setup is **sudo-free** (a venv with pip bootstrapped via get-pip.py, and the
+Qt `.deb`s *downloaded and extracted* into a local dir — nothing installed
+system-wide; `rm -rf .tier2` undoes it). These are harness-only dependencies and
+are never shipped in the `.ankiaddon`:
 
 ```bash
 bash harness/setup_tier2.sh        # one-time: builds .tier2/ (venv + local Qt libs)

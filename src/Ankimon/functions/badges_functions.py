@@ -89,6 +89,8 @@ def handle_review_count_achievement(review_count, achievements):
         200: 2,
         300: 3,
         500: 4,
+        1000: 12,
+        2000: 13,
     }
     badge_to_award = milestones.get(review_count)
     if badge_to_award and not check_for_badge(achievements, badge_to_award):

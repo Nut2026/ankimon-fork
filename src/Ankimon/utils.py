@@ -349,11 +349,22 @@ USELESS_ITEMS = {
 }
 
 
-def random_item():
+def random_item() -> Optional[str]:
+    """Grant and return a random item with an available sprite.
+
+    A fresh/partial asset installation may have no item sprite directory, or all
+    present files may be filtered out. In that case there is no renderable reward,
+    so return ``None`` instead of raising from ``os.listdir``/``random.choice``.
+    """
     item_names: list[str] = []
 
+    try:
+        files = os.listdir(items_path)
+    except OSError:
+        return None
+
     # Iterate over each file in the directory
-    for file in os.listdir(items_path):
+    for file in files:
         # Check if the file is a .png file
         if not file.endswith(".png"):
             continue
@@ -379,6 +390,9 @@ def random_item():
             continue
 
         item_names.append(name)
+
+    if not item_names:
+        return None
 
     item_name = random.choice(item_names)
     # add item to item list

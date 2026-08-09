@@ -47,8 +47,17 @@ def split_japanese_string_by_length(input_string, max_length):
         yield current_line
 
 def resize_pixmap_img(pixmap, max_width):
+    """Scale a pixmap to ``max_width``, keeping its aspect ratio.
+
+    A pixmap whose image failed to load is null and reports a width of 0, so
+    the aspect-ratio maths would raise "integer division or modulo by zero" and
+    take the whole window down (issue #101). Nothing sensible can be scaled
+    from a null pixmap, so hand it back untouched — Qt draws it as a no-op.
+    """
     original_width = pixmap.width()
     original_height = pixmap.height()
+    if original_width <= 0:
+        return pixmap
     new_width = max_width
     new_height = (original_height * max_width) // original_width
     pixmap2 = pixmap.scaled(new_width, new_height)

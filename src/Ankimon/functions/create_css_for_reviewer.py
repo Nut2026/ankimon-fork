@@ -432,6 +432,13 @@ body.dark #ankimon-hud #MyPokeImage,
 """
 
     if xp_bar_config:
+        # Guard the divisor: experience_for_next_lvl arrives from the caller's
+        # exp-table lookup, and a 0 (or None) would raise a ZeroDivisionError
+        # out of the HUD, so render an empty bar (issue #101).
+        _exp_next = int(experience_for_next_lvl or 0)
+        xp_bar_percent = (
+            int((int(main_pokemon.xp or 0) / _exp_next) * 100) if _exp_next else 0
+        )
         css += f"""
 /* XP bar - matte, outlined, no glow */
 #ankimon-hud #xp-bar {{
@@ -440,7 +447,7 @@ body.dark #ankimon-hud #MyPokeImage,
   left: 50px;
   right: 5px;
   z-index: 9999;
-  width: {int((int(main_pokemon.xp or 0) / int(experience_for_next_lvl)) * 100)}%;
+  width: {xp_bar_percent}%;
   height: 10px;
   border-radius: 5px;
   background: rgba(0, 191, 255, 0.85);
