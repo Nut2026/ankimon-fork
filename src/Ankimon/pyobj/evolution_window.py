@@ -79,6 +79,15 @@ class EvoWindow(QWidget):
     def open_dynamic_window(self):
         self.show()
 
+    def _should_show_sprites(self) -> bool:
+        """Check if sprites should be shown based on the global setting."""
+        if self.settings_obj is None:
+            return True
+        try:
+            return self.settings_obj.get("gui.show_sprites_across_ankimon", True)
+        except Exception:
+            return True
+
     def display_evo_complete(self, prevo_id: int, evo_id: int):
         """
         Displays the GUI notification that the given Pokemon has evolved.
@@ -125,12 +134,6 @@ class EvoWindow(QWidget):
         pixmap_bckg = QPixmap()
         pixmap_bckg.load(str(bckgimage_path))
 
-        # Display the Pokémon image
-        image_path = frontdefault / f"{evo_id}.png"
-        image_pixmap = QPixmap()
-        image_pixmap.load(str(image_path))
-        image_pixmap = resize_pixmap_img(image_pixmap, 250)
-
         # Merge the background image and the Pokémon image
         merged_pixmap = QPixmap(pixmap_bckg.size())
         merged_pixmap.fill(
@@ -142,7 +145,16 @@ class EvoWindow(QWidget):
 
         # draw background to a specific pixel
         painter.drawPixmap(0, 0, pixmap_bckg)
-        painter.drawPixmap(125, 10, image_pixmap)
+        
+        # Only load and draw the Pokémon sprite if sprites are enabled
+        show_sprites = self._should_show_sprites()
+        if show_sprites:
+            # Display the Pokémon image
+            image_path = frontdefault / f"{evo_id}.png"
+            image_pixmap = QPixmap()
+            image_pixmap.load(str(image_path))
+            image_pixmap = resize_pixmap_img(image_pixmap, 250)
+            painter.drawPixmap(125, 10, image_pixmap)
 
         # custom font
         custom_font = load_custom_font(20, int(self.settings_obj.get("misc.language")))
@@ -222,34 +234,12 @@ class EvoWindow(QWidget):
         prevo_name = return_name_for_id(prevo_id)
         evo_name = return_name_for_id(evo_id)
 
-        # Display the Pokémon image
-        pkmnimage_path = frontdefault / f"{prevo_id}.png"
-        pkmnimage_path2 = frontdefault / f"{(evo_id)}.png"
-        pkmnpixmap = QPixmap()
-        pkmnpixmap.load(str(pkmnimage_path))
-        pkmnpixmap2 = QPixmap()
-        pkmnpixmap2.load(str(pkmnimage_path2))
+        # Check if sprites should be shown
+        show_sprites = self._should_show_sprites()
+
+        # Load the background image
         pixmap_bckg = QPixmap()
         pixmap_bckg.load(str(evolve_image_path))
-        # Calculate the new dimensions to maintain the aspect ratio
-        max_width = 200
-        original_width = pkmnpixmap.width()
-        original_height = pkmnpixmap.height()
-
-        if original_width > max_width:
-            new_width = max_width
-            new_height = (original_height * max_width) // original_width
-            pkmnpixmap = pkmnpixmap.scaled(new_width, new_height)
-
-        # Calculate the new dimensions to maintain the aspect ratio
-        max_width = 200
-        original_width = pkmnpixmap.width()
-        original_height = pkmnpixmap.height()
-
-        if original_width > max_width:
-            new_width = max_width
-            new_height = (original_height * max_width) // original_width
-            pkmnpixmap2 = pkmnpixmap2.scaled(new_width, new_height)
 
         # Merge the background image and the Pokémon image
         merged_pixmap = QPixmap(pixmap_bckg.size())
@@ -260,8 +250,41 @@ class EvoWindow(QWidget):
         # merge both images together
         painter = QPainter(merged_pixmap)
         painter.drawPixmap(0, 0, pixmap_bckg)
-        painter.drawPixmap(255, 70, pkmnpixmap)
-        painter.drawPixmap(255, 285, pkmnpixmap2)
+        
+        # Only load, resize, and draw Pokémon sprites if sprites are enabled
+        if show_sprites:
+            # Display the Pokémon image
+            pkmnimage_path = frontdefault / f"{prevo_id}.png"
+            pkmnpixmap = QPixmap()
+            pkmnpixmap.load(str(pkmnimage_path))
+            
+            pkmnimage_path2 = frontdefault / f"{(evo_id)}.png"
+            pkmnpixmap2 = QPixmap()
+            pkmnpixmap2.load(str(pkmnimage_path2))
+
+            # Calculate the new dimensions to maintain the aspect ratio
+            max_width = 200
+            original_width = pkmnpixmap.width()
+            original_height = pkmnpixmap.height()
+
+            if original_width > max_width:
+                new_width = max_width
+                new_height = (original_height * max_width) // original_width
+                pkmnpixmap = pkmnpixmap.scaled(new_width, new_height)
+
+            # Calculate the new dimensions to maintain the aspect ratio
+            max_width = 200
+            original_width = pkmnpixmap2.width()
+            original_height = pkmnpixmap2.height()
+
+            if original_width > max_width:
+                new_width = max_width
+                new_height = (original_height * max_width) // original_width
+                pkmnpixmap2 = pkmnpixmap2.scaled(new_width, new_height)
+
+            painter.drawPixmap(255, 70, pkmnpixmap)
+            painter.drawPixmap(255, 285, pkmnpixmap2)
+        
         # Draw the text on top of the image
         font = QFont()
         font.setPointSize(12)  # Adjust the font size as needed

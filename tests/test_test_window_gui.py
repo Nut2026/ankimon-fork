@@ -262,6 +262,31 @@ def test_layout_identity_persists_across_display_calls(make_window):
     assert not win.main_label.pixmap().isNull()
 
 
+def test_hp_none_values_render_in_encounter_and_battle_views(make_window):
+    main = _FakePokemon("pikachu", 25, hp=None, max_hp=None, type=["electric"])
+    enemy = _FakePokemon("charizard", 6, hp=None, max_hp=None, type=["fire", "flying"])
+    win = make_window(main=main, enemy=enemy)
+
+    assert win._safe_hp_pair(None, None) == (0, 1)
+    assert win._safe_hp_pair("invalid", 0) == (0, 1)
+
+    win.display_first_encounter()
+    assert win.current_view == "battle"
+    assert not win.main_label.pixmap().isNull()
+
+    win._last_display_time = 0
+    win.display_battle()
+    assert win.current_view == "battle"
+    assert not win.main_label.pixmap().isNull()
+
+
+def test_hp_values_are_clamped_to_normalized_maximum(make_window):
+    win = make_window()
+
+    assert win._safe_hp_pair(150, 100) == (100, 100)
+    assert win._safe_hp_pair(10**400, 1) == (1, 1)
+
+
 def test_first_encounter_resets_counter_and_battle_does_not_increment(make_window):
     tracker = _FakeTracker()
     tracker.pokemon_encounter = 3

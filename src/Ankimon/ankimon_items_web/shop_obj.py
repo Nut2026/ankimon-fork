@@ -21,8 +21,8 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWidgets import QStackedWidget
 import csv
-from ..utils import give_item
-from ..pyobj.settings import DEFAULT_CONFIG
+from ..utils import give_item, is_alive
+from ..pyobj.settings import DEFAULT_CONFIG, HUD_TOGGLE_AUTO_SYNC_KEYS
 
 try:
     from ..utils import is_dev_mode
@@ -87,6 +87,14 @@ SCREEN_PROFILE = "profile"
 SCREEN_TEAM = "team"
 SCREEN_MOBILE = "mobile"
 SCREEN_HISTORY = "history"
+
+SPRITE_VISIBILITY_SCREENS = (
+    SCREEN_ITEMS,
+    SCREEN_ANKIDEX,
+    SCREEN_SETTINGS,
+    SCREEN_PROFILE,
+    SCREEN_TEAM,
+)
 
 
 class NavBridge(QObject):
@@ -224,7 +232,12 @@ class SettingsBridge(QObject):
             payload = json.loads(payload_json) if payload_json else {}
         except (TypeError, ValueError) as e:
             return {"ok": False, "message": f"Invalid payload JSON: {e}"}
-        return self._w.handle_save_settings(payload)
+
+        explicit_overrides = None
+        if isinstance(payload, dict) and isinstance(payload.get("values"), dict):
+            explicit_overrides = payload.get("explicit_hud_overrides")
+            payload = payload["values"]
+        return self._w.handle_save_settings(payload, explicit_overrides)
 
     @pyqtSlot(str, result="QVariant")
     def searchPokemon(self, query):
@@ -1144,8 +1157,55 @@ class AnkimonItemsWeb(QDialog):
         if not ok:
             return
         self.ready_screens.add(screen)
+        settings_obj = self.shop_manager.settings_obj if self.shop_manager is not None else None
+        if settings_obj is not None and screen in SPRITE_VISIBILITY_SCREENS:
+            self._apply_sprite_visibility(
+                settings_obj.get("gui.show_sprites_across_ankimon", True),
+                screens=(screen,),
+            )
         if self.current_screen == screen:
             self.push_screen_data()
+
+    def _apply_sprite_visibility(self, show_sprites, screens=None):
+        """Hide raster sprite content without collapsing the surrounding UI.
+
+        The setting applies only to the intended non-battle shell screens.
+        ``visibility`` preserves every image element's allocated size; removing
+        raster CSS backgrounds leaves their sized containers intact.
+        """
+        requested_screens = screens or SPRITE_VISIBILITY_SCREENS
+        targets = tuple(
+            screen
+            for screen in requested_screens
+            if screen in SPRITE_VISIBILITY_SCREENS
+        )
+        enabled = "true" if show_sprites else "false"
+        script = f"""
+            (() => {{
+                const show = {enabled};
+                let style = document.getElementById('ankimon-sprite-visibility');
+                if (!style) {{
+                    style = document.createElement('style');
+                    style.id = 'ankimon-sprite-visibility';
+                    document.head.appendChild(style);
+                }}
+                document.querySelectorAll('*').forEach((element) => {{
+                    const background = getComputedStyle(element).backgroundImage;
+                    if (background.includes('.png') || background.includes('.gif')) {{
+                        element.classList.add('ankimon-raster-background');
+                    }}
+                }});
+                style.textContent = show ? '' : `
+                    img[src*=".png"], img[src*=".gif"] {{ visibility: hidden !important; }}
+                    [style*=".png"], [style*=".gif"] {{ background-image: none !important; }}
+                    .ankimon-raster-background {{ background-image: none !important; }}
+                `;
+            }})()
+        """
+        for screen in targets:
+            view = self._views.get(screen)
+            if view is not None:
+                view.page().runJavaScript(script)
 
     def push_screen_data(self):
         # A screen can only receive data once its first load has finished.
@@ -2188,57 +2248,114 @@ class AnkimonItemsWeb(QDialog):
         setattr(self, cache_attr, data)
         return data
 
-    def handle_save_settings(self, payload):
+    def handle_save_settings(self, payload, explicit_overrides=None):
         """Apply the JS-side payload, run legacy bounds checks, persist."""
         from . import settings_schema
 
         if not isinstance(payload, dict):
             return {"ok": False, "message": "Invalid payload."}
 
+        if explicit_overrides is None:
+            # Backward compatibility for callers that still send the legacy flat
+            # payload: a HUD key present there represents an explicit edit.
+            explicit_overrides = {
+                key for key in payload if key in HUD_TOGGLE_AUTO_SYNC_KEYS
+            }
+        elif isinstance(explicit_overrides, (list, tuple, set)):
+            explicit_overrides = {
+                str(key)
+                for key in explicit_overrides
+                if str(key) in HUD_TOGGLE_AUTO_SYNC_KEYS
+            }
+        else:
+            explicit_overrides = set()
+
         settings_obj = self.shop_manager.settings_obj if self.shop_manager is not None else None
         if settings_obj is None:
             return {"ok": False, "message": "Settings service is uninitialized."}
-        try:
-            config = settings_obj.load_config()
-        except Exception:
-            config = dict(settings_obj.config)
 
-        # Snapshot what's on disk so we can skip writes for unchanged keys
-        # after clamping (avoids spurious observer notifications).
-        original_config = dict(config)
+        # Load the CURRENT live config as our baseline
+        live_config = settings_obj.load_config()
+        # Create a detached working copy for all validation/coercion
+        working_config = dict(live_config)
+        original_config = dict(live_config)
 
         # Coerce incoming values back to the type of the existing config
         # entry so e.g. an int field doesn't silently become a string.
         try:
             for raw_key, raw_val in payload.items():
                 key = str(raw_key)
-                if key not in config:
+                if key not in working_config:
                     continue
                 if (
                     key == "leaderboard.api_key"
                     and settings_schema.is_unchanged_secret_placeholder(raw_val)
                 ):
                     continue
-                config[key] = self._coerce_incoming(config[key], raw_val)
+                working_config[key] = self._coerce_incoming(working_config[key], raw_val)
         except ValueError as e:
             return {"ok": False, "message": f"Validation error: {e}"}
 
-        config, adjustments = settings_schema.validate_and_clamp(config, original_config)
+        working_config, adjustments = settings_schema.validate_and_clamp(working_config, original_config)
 
         try:
             changed = False
-            for key, val in config.items():
+            save_order = []
+            main_key = "gui.show_sprites_across_ankimon"
+            if original_config.get(main_key) != working_config.get(main_key):
+                save_order.append(main_key)
+            for key, val in working_config.items():
+                if key == main_key:
+                    continue
                 if original_config.get(key) != val:
-                    settings_obj.set(key, val)
-                    changed = True
+                    save_order.append(key)
+
+            # Only write to the live settings object after all validation has passed
+            if save_order:
+                for key in save_order:
+                    settings_obj.set(key, working_config[key], explicit_overrides)
+                changed = True
+
             if changed:
-                # Settings.save_config(config) requires the dict — passing
-                # the fully-merged config persists every key in one write.
-                settings_obj.save_config(config)
+                # Persist the live settings object, not the original payload dict.
+                # The live object may have been updated by auto-sync logic in
+                # Settings.set() for dependent HUD toggles.
+                settings_obj.save_config(settings_obj.config, explicit_overrides)
+                # Reload the final config state from the live object
+                final_config = dict(settings_obj.config)
+            else:
+                final_config = original_config
         except Exception as e:
+            # Restore the original live config state on failure to prevent
+            # partial application from leaking into subsequent operations.
+            try:
+                # If the write loop partially applied some keys before failing,
+                # restore the original_config into the live settings object.
+                for key, val in original_config.items():
+                    if settings_obj.config.get(key) != val:
+                        settings_obj.config[key] = val
+            except Exception:
+                # If restoration itself fails, we're in a degraded state;
+                # still return the error to the caller.
+                pass
             return {"ok": False, "message": f"Save failed: {e}"}
 
-        self._refresh_reviewer_hotkeys(config)
+        # Apply sprite visibility to web views and then refresh hotkeys.
+        self._apply_sprite_visibility(
+            final_config.get("gui.show_sprites_across_ankimon", True)
+        )
+        self._refresh_reviewer_hotkeys(final_config)
+
+        # Refresh already-open native windows that depend on sprite visibility.
+        self._refresh_native_windows()
+
+        # Emit a shared settings-change notification for diagnostics only.
+        try:
+            events.emit("settings_changed", config=final_config)
+        except Exception as e:
+            logger = services.logger
+            if logger:
+                logger.log("error", f"Failed to emit settings_changed event: {e}")
 
         if adjustments:
             return {
@@ -2248,8 +2365,54 @@ class AnkimonItemsWeb(QDialog):
             }
         return {"ok": True, "message": "Settings saved."}
 
-    @staticmethod
-    def _coerce_incoming(existing, incoming):
+    def _on_settings_changed(self, data):
+        """React to a settings_changed event from any source (web settings
+        or legacy SettingsWindow) by applying sprite visibility to web views
+        and refreshing native views that depend on the sprite setting."""
+        config = data.get("config") if isinstance(data, dict) else None
+        if config is None:
+            # If no config payload was provided, reload from disk.
+            settings_obj = self.shop_manager.settings_obj if self.shop_manager is not None else None
+            if settings_obj is not None:
+                try:
+                    config = settings_obj.load_config()
+                except Exception:
+                    pass
+        if config is not None:
+            self._apply_sprite_visibility(
+                config.get("gui.show_sprites_across_ankimon", True)
+            )
+
+    def _refresh_native_windows(self):
+        from ..utils import is_alive
+        from .. import singletons
+
+        try:
+            if is_alive(services.pokemon_pc):
+                services.pokemon_pc.refresh_gui()
+        except Exception:
+            pass
+
+        try:
+            if is_alive(services.reviewer):
+                services.reviewer.refresh_hud()
+        except Exception:
+            pass
+
+        try:
+            if services.trainer_card is not None:
+                services.trainer_card.refresh()
+        except Exception:
+            pass
+
+        try:
+            achievement_win = singletons._WINDOW_CACHE.get("achievement_bag")
+            if is_alive(achievement_win):
+                achievement_win.renewWidgets()
+        except Exception:
+            pass
+
+    def _coerce_incoming(self, existing, incoming):
         """Match the new value's type to the existing config entry so a
         text-input UI doesn't accidentally rewrite an int field as a str.
         Raises ValueError for non-coercible numeric input — caller surfaces
@@ -2297,4 +2460,3 @@ class AnkimonItemsWeb(QDialog):
 
 
 # _attribute_xp_and_evs_to_companion has been moved to functions.mobile_sync
-

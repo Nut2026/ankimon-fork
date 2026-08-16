@@ -427,12 +427,19 @@ class TestWindow(QWidget):
         # draw background to a specific pixel
         painter.drawPixmap(0, 0, pixmap_bckg)
 
+        enemy_hp, enemy_max_hp = self._safe_hp_pair(
+            self.enemy_pokemon.hp, self.enemy_pokemon.max_hp
+        )
+        main_hp, main_max_hp = self._safe_hp_pair(
+            self.main_pokemon.hp, self.main_pokemon.max_hp
+        )
+
         painter = self.draw_hp_bar(
-            118, 76, 8, 116, self.enemy_pokemon.hp, self.enemy_pokemon.max_hp, painter
+            118, 76, 8, 116, enemy_hp, enemy_max_hp, painter
         )  # enemy pokemon hp_bar
 
         painter = self.draw_hp_bar(
-            401, 208, 8, 116, self.main_pokemon.hp, self.main_pokemon.max_hp, painter
+            401, 208, 8, 116, main_hp, main_max_hp, painter
         )  # main pokemon hp_bar
 
         painter.drawPixmap(0, 0, pixmap_ui)
@@ -505,13 +512,11 @@ class TestWindow(QWidget):
         # painter.drawText(55, 85, gender_text)
         painter.drawText(490, 199, f"{self.main_pokemon.level}")
 
-        hp_x = 442 if int(self.main_pokemon.hp) < 100 else 430  # Shift left if 3 digits
-        max_hp_x = (
-            487 if int(self.main_pokemon.max_hp) < 100 else 480
-        )  # Shift left if 3 digits
+        hp_x = 442 if main_hp < 100 else 430  # Shift left if 3 digits
+        max_hp_x = 487 if main_max_hp < 100 else 480  # Shift left if 3 digits
 
-        painter.drawText(max_hp_x, 238, str(int(self.main_pokemon.max_hp)))
-        painter.drawText(hp_x, 238, str(int(self.main_pokemon.hp)))
+        painter.drawText(max_hp_x, 238, str(main_max_hp))
+        painter.drawText(hp_x, 238, str(main_hp))
 
         painter.setFont(msg_font)
         painter.setPen(QColor(240, 240, 208))  # Text color
@@ -520,21 +525,17 @@ class TestWindow(QWidget):
 
         painter.setFont(hp_enemy_text_font)
         painter.setPen(QColor(31, 31, 39))  # Text color
-        enemy_hp_x = (
-            41 if int(self.enemy_pokemon.max_hp) < 100 else 40
-        )  # Shift left if 3 digits
-        enemy_max_hp_x = (
-            64 if int(self.enemy_pokemon.max_hp) < 100 else 56
-        )  # Shift left if 3 digits
+        enemy_hp_x = 41 if enemy_max_hp < 100 else 40  # Shift left if 3 digits
+        enemy_max_hp_x = 64 if enemy_max_hp < 100 else 56  # Shift left if 3 digits
         painter.drawText(
             enemy_hp_x,
-            84 if int(self.enemy_pokemon.max_hp) < 100 else 80,
-            str(int(self.enemy_pokemon.hp)) + "/",
+            84 if enemy_max_hp < 100 else 80,
+            str(enemy_hp) + "/",
         )
         painter.drawText(
             enemy_max_hp_x,
-            84 if int(self.enemy_pokemon.max_hp) < 100 else 88,
-            str(int(self.enemy_pokemon.max_hp)),
+            84 if enemy_max_hp < 100 else 88,
+            str(enemy_max_hp),
         )
 
         self._draw_cp_pp(painter)
@@ -546,12 +547,28 @@ class TestWindow(QWidget):
 
         return image_label, msg_font
 
+    @staticmethod
+    def _safe_hp_pair(hp, max_hp):
+        """Return numeric HP values that are safe for rendering."""
+        try:
+            safe_hp = int(hp) if hp is not None else 0
+        except (TypeError, ValueError, OverflowError):
+            safe_hp = 0
+
+        try:
+            safe_max_hp = int(max_hp) if max_hp is not None else 1
+        except (TypeError, ValueError, OverflowError):
+            safe_max_hp = 1
+
+        safe_max_hp = max(1, safe_max_hp)
+        safe_hp = min(max(0, safe_hp), safe_max_hp)
+        return safe_hp, safe_max_hp
+
     def draw_hp_bar(self, x, y, h, w, hp, max_hp, painter):
-        # A corrupt save can carry max_hp = 0; draw an empty bar rather than
-        # letting the whole battle window die on the division (issue #101).
-        hp_fraction = (hp / max_hp) if max_hp else 0
-        pokemon_hp_percent = int(hp_fraction * 100)
-        hp_bar_value = int(w * hp_fraction)
+        hp, max_hp = self._safe_hp_pair(hp, max_hp)
+        hp_ratio = max(0, min(hp / max_hp, 1))
+        pokemon_hp_percent = int(hp_ratio * 100)
+        hp_bar_value = int(w * hp_ratio)
 
         # Draw the HP bar
         if pokemon_hp_percent < 25:
@@ -623,12 +640,19 @@ class TestWindow(QWidget):
         # draw background to a specific pixel
         painter.drawPixmap(0, 0, pixmap_bckg)
 
+        enemy_hp, enemy_max_hp = self._safe_hp_pair(
+            self.enemy_pokemon.hp, self.enemy_pokemon.max_hp
+        )
+        main_hp, main_max_hp = self._safe_hp_pair(
+            self.main_pokemon.hp, self.main_pokemon.max_hp
+        )
+
         painter = self.draw_hp_bar(
-            118, 76, 8, 116, self.enemy_pokemon.hp, self.enemy_pokemon.max_hp, painter
+            118, 76, 8, 116, enemy_hp, enemy_max_hp, painter
         )  # enemy pokemon hp_bar
 
         painter = self.draw_hp_bar(
-            401, 208, 8, 116, self.main_pokemon.hp, self.main_pokemon.max_hp, painter
+            401, 208, 8, 116, main_hp, main_max_hp, painter
         )  # main pokemon hp_bar
 
         painter.drawPixmap(0, 0, pixmap_ui)
@@ -701,13 +725,11 @@ class TestWindow(QWidget):
         painter.drawText(208, 67, f"{self.enemy_pokemon.level}")
         painter.drawText(490, 199, f"{self.main_pokemon.level}")
 
-        hp_x = 442 if int(self.main_pokemon.hp) < 100 else 430  # Shift left if 3 digits
-        max_hp_x = (
-            487 if int(self.main_pokemon.max_hp) < 100 else 480
-        )  # Shift left if 3 digits
+        hp_x = 442 if main_hp < 100 else 430  # Shift left if 3 digits
+        max_hp_x = 487 if main_max_hp < 100 else 480  # Shift left if 3 digits
 
-        painter.drawText(max_hp_x, 238, str(int(self.main_pokemon.max_hp)))
-        painter.drawText(hp_x, 238, str(int(self.main_pokemon.hp)))
+        painter.drawText(max_hp_x, 238, str(main_max_hp))
+        painter.drawText(hp_x, 238, str(main_hp))
 
         painter.setFont(msg_font)
         painter.setPen(QColor(31, 31, 39))  # Text color
@@ -715,21 +737,17 @@ class TestWindow(QWidget):
         # Drawing enemy pokemon hp
         painter.setFont(hp_enemy_text_font)
         painter.setPen(QColor(31, 31, 39))  # Text color
-        enemy_hp_x = (
-            41 if int(self.enemy_pokemon.max_hp) < 100 else 40
-        )  # Shift left if 3 digits
-        enemy_max_hp_x = (
-            64 if int(self.enemy_pokemon.max_hp) < 100 else 56
-        )  # Shift left if 3 digits
+        enemy_hp_x = 41 if enemy_max_hp < 100 else 40  # Shift left if 3 digits
+        enemy_max_hp_x = 64 if enemy_max_hp < 100 else 56  # Shift left if 3 digits
         painter.drawText(
             enemy_hp_x,
-            84 if int(self.enemy_pokemon.max_hp) < 100 else 80,
-            str(int(self.enemy_pokemon.hp)) + "/",
+            84 if enemy_max_hp < 100 else 80,
+            str(enemy_hp) + "/",
         )
         painter.drawText(
             enemy_max_hp_x,
-            84 if int(self.enemy_pokemon.max_hp) < 100 else 88,
-            str(int(self.enemy_pokemon.max_hp)),
+            84 if enemy_max_hp < 100 else 88,
+            str(enemy_max_hp),
         )
 
         self._draw_cp_pp(painter)

@@ -146,6 +146,23 @@ class Reviewer_Manager:
                 pass
         return addon_package or "1908235722"
 
+    @staticmethod
+    def _safe_hp_pair(hp, max_hp):
+        """Return numeric HP values that are safe for HUD rendering."""
+        try:
+            safe_hp = int(hp) if hp is not None else 0
+        except (TypeError, ValueError, OverflowError):
+            safe_hp = 0
+
+        try:
+            safe_max_hp = int(max_hp) if max_hp is not None else 1
+        except (TypeError, ValueError, OverflowError):
+            safe_max_hp = 1
+
+        safe_max_hp = max(1, safe_max_hp)
+        safe_hp = min(max(0, safe_hp), safe_max_hp)
+        return safe_hp, safe_max_hp
+
     def update_life_bar(self, reviewer, card, ease):
         # GUARD: only repaint on direct calls (refresh_hud / battle_loop pass
         # card=0, ease=0). The reviewer_did_answer_card hook fires with a real
@@ -156,10 +173,21 @@ class Reviewer_Manager:
         if card is not None and not isinstance(card, int):
             return  # Hook received a Card object
 
+        if self.enemy_pokemon is None or self.main_pokemon is None:
+            self._last_state = None
+            return
+
         if int(self.settings.get("gui.show_mainpkmn_in_reviewer")) == 3:
             reviewer.web.eval("if(window.__ankimonHud) window.__ankimonHud.clear();")
             self._last_state = None
             return
+
+        enemy_hp, enemy_max_hp = self._safe_hp_pair(
+            self.enemy_pokemon.hp, self.enemy_pokemon.max_hp
+        )
+        main_hp, main_max_hp = self._safe_hp_pair(
+            self.main_pokemon.hp, self.main_pokemon.max_hp
+        )
 
         # 1. Ownership cache (avoid a DB query on every repaint of the same enemy).
         is_pokemon_owned = self._ownership_cache.get(self.enemy_pokemon.id)
@@ -242,12 +270,12 @@ class Reviewer_Manager:
 
         current_state = (
             self.enemy_pokemon.id,
-            self.enemy_pokemon.hp,
-            self.enemy_pokemon.max_hp,
+            enemy_hp,
+            enemy_max_hp,
             self.enemy_pokemon.battle_status,
             self.main_pokemon.id,
-            self.main_pokemon.hp,
-            self.main_pokemon.max_hp,
+            main_hp,
+            main_max_hp,
             self.main_pokemon.xp,
             self.settings.get("gui.show_mainpkmn_in_reviewer"),
             self.settings.get("gui.reviewer_image_gif"),
@@ -304,30 +332,14 @@ class Reviewer_Manager:
                 side = "back"
             main_pkmn_sprite_url = get_sprite_url(self.main_pokemon, side)
 
-        pokemon_hp_percent = (
-            int((self.enemy_pokemon.hp / self.enemy_pokemon.max_hp) * 50)
-            if self.enemy_pokemon.max_hp > 0
-            else 0
-        )
+        pokemon_hp_percent = int((enemy_hp / enemy_max_hp) * 50)
         if int(self.settings.get("gui.show_mainpkmn_in_reviewer")) > 0:
-            mainpkmn_hp_percent = (
-                int((self.main_pokemon.hp / self.main_pokemon.max_hp) * 50)
-                if self.main_pokemon.max_hp > 0
-                else 0
-            )
+            mainpkmn_hp_percent = int((main_hp / main_max_hp) * 50)
         else:
             mainpkmn_hp_percent = 0  # Not used in this mode
 
-        enemy_hp_true_percent = (
-            (self.enemy_pokemon.hp / self.enemy_pokemon.max_hp) * 100
-            if self.enemy_pokemon.max_hp > 0
-            else 0
-        )
-        main_hp_true_percent = (
-            (self.main_pokemon.hp / self.main_pokemon.max_hp) * 100
-            if self.main_pokemon.max_hp > 0
-            else 0
-        )
+        enemy_hp_true_percent = (enemy_hp / enemy_max_hp) * 100
+        main_hp_true_percent = (main_hp / main_max_hp) * 100
 
         # Build hud_html
         hud_html = '<div id="ankimon-hud">'
@@ -361,7 +373,7 @@ class Reviewer_Manager:
             )
             hud_html += f'<div id="name-display" class="Ankimon">{name_display_text}</div>'
 
-        if self.enemy_pokemon.hp > 0:
+        if enemy_hp > 0:
             hud_html += create_status_html(
                 f"{self.enemy_pokemon.battle_status}",
                 self.settings,
@@ -374,7 +386,7 @@ class Reviewer_Manager:
             )
 
         if self.settings.get("gui.hud_hp_text"):
-            hud_html += f'<div id="hp-display" class="Ankimon">HP: {int(self.enemy_pokemon.hp)}/{int(self.enemy_pokemon.max_hp)}</div>'
+            hud_html += f'<div id="hp-display" class="Ankimon">HP: {enemy_hp}/{enemy_max_hp}</div>'
 
         if self.settings.get("gui.hud_enemy_sprite"):
             enemy_poke_animation_style = (
@@ -427,7 +439,7 @@ class Reviewer_Manager:
                 )
                 hud_html += f'<div id="myname-display" class="Ankimon">{main_name_display_text}</div>'
             if self.settings.get("gui.hud_hp_text"):
-                hud_html += f'<div id="myhp-display" class="Ankimon">HP: {int(self.main_pokemon.hp)}/{int(self.main_pokemon.max_hp)}</div>'
+                hud_html += f'<div id="myhp-display" class="Ankimon">HP: {main_hp}/{main_max_hp}</div>'
             if self.settings.get("gui.hud_hp_bars"):
                 hud_html += '<div id="mylife-bar" class="Ankimon"></div>'
 

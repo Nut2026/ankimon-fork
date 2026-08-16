@@ -33,6 +33,7 @@ DEFAULT_CONFIG = {
     "controls.allow_to_choose_moves": False,
     "gui.animate_time": True,
     "gui.gif_in_collection": True,
+    "gui.show_sprites_across_ankimon": True,
     "gui.styling_in_reviewer": True,
     "gui.pop_up_dialog_message_on_defeat": False,
     "gui.pop_up_dialog_message_on_item": True,
@@ -101,6 +102,17 @@ DEFAULT_CONFIG = {
     "leaderboard.username": "",
     "leaderboard.api_key": "",
 }
+
+HUD_TOGGLE_AUTO_SYNC_KEYS = (
+    "gui.hud_player_sprite",
+    "gui.hud_enemy_sprite",
+    "gui.hud_xp_bar",
+    "gui.hud_hp_bars",
+    "gui.hud_status_badge",
+    "gui.hud_owned_indicator",
+    "gui.hud_enemy_shiny_indicator",
+    "gui.hud_player_shiny_indicator",
+)
 
 
 class Settings:
@@ -194,7 +206,10 @@ class Settings:
                 config[key] = DEFAULT_CONFIG[key]
 
         if modified:
-            self.save_config(config)
+            # Persist schema/default migration without triggering behavioral
+            # side effects such as HUD autosync. Existing user HUD preferences
+            # must survive the introduction of a new master visibility key.
+            self.save_config(config, apply_hud_autosync=False)
 
         # Preserve the identity of ``self.config`` across (re)loads: external
         # holders of the dict keep observing updates instead of a stale rebind.
@@ -229,7 +244,54 @@ class Settings:
                         f"Ankimon: Warning: Could not convert '{config[key]}' for key '{key}' to int."
                     )
 
-    def save_config(self, config):
+    def _apply_hud_toggle_autosync(
+        self, config, previous_value=None, explicit_overrides=None
+    ):
+        """When the main sprite visibility setting changes, mirror that choice
+        into the reviewer HUD toggles for the listed elements.
+
+        The global setting is authoritative for HUD toggles the user did not
+        explicitly override in the same save transaction.
+        """
+        if not isinstance(config, dict):
+            return []
+
+        main_key = "gui.show_sprites_across_ankimon"
+        if main_key not in config:
+            return []
+
+        current_value = config.get(main_key, True)
+
+        # Autosync is a change-side effect, not a migration/default-seeding
+        # side effect. A missing previous value means there is no user-initiated
+        # transition to mirror.
+        if previous_value is None or previous_value == current_value:
+            return []
+
+        explicit_overrides = set(explicit_overrides or ())
+
+        changed_keys = []
+        for key in HUD_TOGGLE_AUTO_SYNC_KEYS:
+            if key in explicit_overrides:
+                continue
+            if config.get(key, True) != current_value:
+                config[key] = current_value
+                changed_keys.append(key)
+
+        return changed_keys
+
+    def save_config(
+        self, config, explicit_overrides=None, apply_hud_autosync=True
+    ):
+        previous_value = None
+        if hasattr(self, "config") and self.config is not None:
+            previous_value = self.config.get("gui.show_sprites_across_ankimon", True)
+
+        if apply_hud_autosync:
+            self._apply_hud_toggle_autosync(
+                config, previous_value, explicit_overrides
+            )
+
         # 1. Always save to database if available
         if services.db is not None:
             try:
@@ -279,19 +341,26 @@ class Settings:
             return default
         return DEFAULT_CONFIG.get(key)
 
-    def set(self, key, value):
+    def set(self, key, value, explicit_overrides=None):
+        previous_value = self.config.get("gui.show_sprites_across_ankimon", True)
         self.config[key] = value
+        changed_keys = self._apply_hud_toggle_autosync(
+            self.config, previous_value, explicit_overrides
+        )
+
         # Persist ONLY the changed key. The previous implementation re-saved the
         # entire config (~60 rows + a commit) on every set; the battle loop awards
         # cash per review, so a single battle rewrote all of config dozens of times.
         if services.db is not None:
             try:
                 services.db.set_config_value(key, value)
+                for changed_key in changed_keys:
+                    services.db.set_config_value(changed_key, self.config[changed_key])
             except Exception as e:
                 print(f"Ankimon: Failed to save config key '{key}': {e}")
         else:
             # No DB yet (very early boot / legacy) — fall back to the full save.
-            self.save_config(self.config)
+            self.save_config(self.config, explicit_overrides)
             return
         self._save_legacy_obf_if_present()
         self.compute_gui_config()

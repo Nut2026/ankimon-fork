@@ -151,7 +151,7 @@ def get_settings_window():
         from .pyobj.settings_window import SettingsWindow
 
         win = SettingsWindow(
-            config=settings_obj.config,  # Use settings_obj.config instead of settings_obj.settings.config
+            config=dict(settings_obj.config),  # detached copy to avoid live mutation aliasing
             set_config_callback=settings_obj.set,
             save_config_callback=settings_obj.save_config,
             load_config_callback=settings_obj.load_config,

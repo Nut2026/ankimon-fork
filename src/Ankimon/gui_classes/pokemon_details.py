@@ -118,6 +118,7 @@ def PokemonCollectionDetailsSplit(
     evolution_rejected: bool = False,
     friendship_time_enabled: bool = True,
     trigger_evo_callback: Callable = None,
+    show_sprites: bool = True,
 ):
     """Build the details panel as split components.
 
@@ -172,7 +173,10 @@ def PokemonCollectionDetailsSplit(
             "front", "gif" if gif_in_collection else "png", id, shiny, gender, name
         )
 
-        if gif_in_collection:
+        if not show_sprites:
+            # Keep the image area and surrounding layout stable for focus mode.
+            pkmnimage_label.setFixedSize(150, 150)
+        elif gif_in_collection:
             pkmnimage_label = MovieSplashLabel(pkmnimage_path)
         else:
             cache_key = (str(pkmnimage_path), shiny, gender)
@@ -205,7 +209,9 @@ def PokemonCollectionDetailsSplit(
         typeimage_path = addon_dir / "addon_sprites" / "Types" / typeimage_file
         pkmntype_label = QLabel()
         pkmntypepixmap = QPixmap()
-        if pkmntypepixmap.load(str(typeimage_path)):
+        if not show_sprites:
+            pkmntype_label.setFixedSize(50, 50)
+        elif pkmntypepixmap.load(str(typeimage_path)):
             # Optional: Scale type icon to a fixed size (e.g., 50x50) to fit nicely
             pkmntypepixmap = pkmntypepixmap.scaled(
                 50, 50, Qt.AspectRatioMode.KeepAspectRatio
@@ -221,7 +227,9 @@ def PokemonCollectionDetailsSplit(
             typeimage_path2 = addon_dir / "addon_sprites" / "Types" / type_image_file2
             pkmntype_label2 = QLabel()
             pkmntypepixmap2 = QPixmap()
-            if pkmntypepixmap2.load(str(typeimage_path2)):
+            if not show_sprites:
+                pkmntype_label2.setFixedSize(50, 50)
+            elif pkmntypepixmap2.load(str(typeimage_path2)):
                 # Optional: Scale second type icon similarly
                 pkmntypepixmap2 = pkmntypepixmap2.scaled(
                     50, 50, Qt.AspectRatioMode.KeepAspectRatio
@@ -742,6 +750,7 @@ def PokemonCollectionDetails(
     evolution_rejected: bool = False,
     friendship_time_enabled: bool = True,
     trigger_evo_callback: Callable = None,
+    show_sprites: bool = True,
 ):
     """Classic single-layout details panel (backward-compatible entrypoint).
 
@@ -784,6 +793,7 @@ def PokemonCollectionDetails(
             evolution_rejected=evolution_rejected,
             friendship_time_enabled=friendship_time_enabled,
             trigger_evo_callback=trigger_evo_callback,
+            show_sprites=show_sprites,
         )
     )
     layout = QVBoxLayout()
