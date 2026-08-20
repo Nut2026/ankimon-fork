@@ -43,8 +43,13 @@ from .update_manager import (
     published_at_for_tag,
     stamp_addon_mod,
 )
-from ..resources import addon_ver, IS_EXPERIMENTAL_BUILD, icon_path
 
+from ..resources import addon_ver, IS_EXPERIMENTAL_BUILD
+
+try:
+    from ..resources import icon_path
+except ImportError:
+    icon_path = None
 
 def _start_query_op(parent, op, success, failure):
     try:
