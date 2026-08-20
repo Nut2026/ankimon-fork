@@ -2019,25 +2019,27 @@ def show_release_update_prompt(channel: str, release: dict):
     
     layout.addLayout(button_layout)
     
-    def on_update():
-        dialog.accept()
+    # Helper to persist snooze if checkbox is checked
+    def _persist_snooze_if_checked():
         if snooze.isChecked():
             import time
             from .update_manager import set_update_skip_until
             set_update_skip_until(time.time() + 604800)
+    
+    def on_update():
+        dialog.accept()
         BranchUpdateProgressDialog(tag, tag, mw, release=release).exec()
     
     def on_later():
         dialog.reject()
-        if snooze.isChecked():
-            import time
-            from .update_manager import set_update_skip_until
-            set_update_skip_until(time.time() + 604800)
         QMessageBox.information(
-            dialog,
+            mw,
             "Update Later",
             "No problem! You can always check for updates and install them later by going to Ankimon => Help => Check for Updates."
         )
+    
+    # Connect the finished signal to persist snooze on any close path
+    dialog.finished.connect(_persist_snooze_if_checked)
     
     update_btn.clicked.connect(on_update)
     later_btn.clicked.connect(on_later)
