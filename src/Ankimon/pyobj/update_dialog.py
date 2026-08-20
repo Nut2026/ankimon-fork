@@ -68,13 +68,11 @@ def _format_inline(text: str) -> str:
     """
     Apply inline formatting (bold, italic, strikethrough) to text.
     """
-    # Bold
+    # Bold (asterisk only)
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
-    text = re.sub(r'__(.*?)__', r'<b>\1</b>', text)
     
-    # Italic
+    # Italic (asterisk only)
     text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', text)
-    text = re.sub(r'_(.*?)_', r'<i>\1</i>', text)
     
     # Strikethrough
     text = re.sub(r'~~(.*?)~~', r'<s>\1</s>', text)
