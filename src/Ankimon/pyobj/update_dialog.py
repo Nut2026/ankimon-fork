@@ -90,6 +90,9 @@ def markdown_to_html(text: str) -> str:
     if not text:
         return ""
     
+    # First, escape HTML entities in the remote text to prevent injection
+    text = _escape(text)
+    
     # Look for patterns like "Download:", "**Download:**", "**Download**:", etc.
     download_match = re.search(r'\n\s*[*]*Download[*]*:\s*https?://', text, re.IGNORECASE)
     if download_match:
@@ -126,28 +129,11 @@ def markdown_to_html(text: str) -> str:
     processed_parts = []
     for part in parts:
         if part.startswith('<a'):
+            # These are safe anchors we just created
             processed_parts.append(part)
         else:
             processed_parts.append(re.sub(url_pattern, fix_plain_url, part))
     text = ''.join(processed_parts)
-    
-    # First, temporarily replace <a> tags with a placeholder
-    link_placeholders = {}
-    def save_link(match):
-        placeholder = f'__LINK_{len(link_placeholders)}__'
-        link_placeholders[placeholder] = match.group(0)
-        return placeholder
-    
-    text = re.sub(r'<a[^>]*>.*?</a>', save_link, text, flags=re.DOTALL)
-    
-    # Now escape HTML entities in the remaining text
-    text = text.replace('&', '&amp;')
-    text = text.replace('<', '&lt;')
-    text = text.replace('>', '&gt;')
-    
-    # Restore the <a> tags
-    for placeholder, link_html in link_placeholders.items():
-        text = text.replace(placeholder, link_html)
     
     # Process line by line, preserving structure
     lines = text.split('\n')
@@ -1861,11 +1847,22 @@ def show_release_update_prompt(channel: str, release: dict):
     if notes:
         notes_html = markdown_to_html(notes)
     
+    # Validate that the release has the required keys before proceeding
+    if not release.get("name") or not release.get("zipball_url"):
+        QMessageBox.warning(
+            mw,
+            "Invalid Release",
+            "The release data is incomplete and cannot be installed.\n\n"
+            "Please try again later or check for updates manually."
+        )
+        return
+    
     dialog = QDialog(mw)
     dialog.setWindowTitle("Ankimon Update Available")
     dialog.setMinimumWidth(550)
     dialog.setMinimumHeight(450)
-    dialog.setWindowIcon(QIcon(str(icon_path)))
+    if icon_path:
+        dialog.setWindowIcon(QIcon(str(icon_path)))
     
     is_dark = theme_manager.night_mode
     if is_dark:
@@ -1905,9 +1902,8 @@ def show_release_update_prompt(channel: str, release: dict):
             border-radius: 8px;
             padding: 14px;
             color: {text};
-            font-size: 0.88rem;
+            font-size: 14px;
             font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            line-height: 1.6;
         }}
         QTextBrowser a {{
             color: {accent_blue};
