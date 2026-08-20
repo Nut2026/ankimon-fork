@@ -20,8 +20,13 @@ from aqt.qt import (
     QSpacerItem,
     QTextBrowser,
     QCheckBox,
-    QIcon,
 )
+
+try:
+    from aqt.qt import QIcon
+except ImportError:
+    from PyQt6.QtGui import QIcon
+
 from aqt.theme import theme_manager
 
 from .update_manager import (
