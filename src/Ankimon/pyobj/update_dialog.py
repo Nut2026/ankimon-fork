@@ -69,6 +69,8 @@ def markdown_to_html(text: str) -> str:
     Makes all links clickable - both [text](url) format and plain URLs.
     Truncates content right before the "Download:" line (handles bold formatting).
     """
+    from html import escape as _escape
+    
     if not text:
         return ""
     
@@ -84,7 +86,10 @@ def markdown_to_html(text: str) -> str:
         """
         text_content = match.group(1)
         url = match.group(2)
-        return f'<a href="{url}">{text_content}</a>'
+        # Only allow http/https schemes for security
+        if not re.match(r'https?://', url, re.IGNORECASE):
+            return _escape(match.group(0))
+        return f'<a href="{_escape(url, quote=True)}">{_escape(text_content)}</a>'
     
     text = re.sub(r'\[(.*?)\]\((.*?)\)', fix_markdown_link, text)
     
@@ -93,7 +98,11 @@ def markdown_to_html(text: str) -> str:
         Handle plain URLs - convert to clickable links
         """
         url = match.group(0)
-        return f'<a href="{url}">{url} (open in external tab)</a>'
+        # Only allow http/https schemes for security
+        if not re.match(r'https?://', url, re.IGNORECASE):
+            return _escape(url)
+        safe_url = _escape(url, quote=True)
+        return f'<a href="{safe_url}">{safe_url} (open in external tab)</a>'
     
     # Match URLs that aren't already inside an <a> tag
     url_pattern = r'https?://[^\s<>"\'()]+'
@@ -221,7 +230,6 @@ def markdown_to_html(text: str) -> str:
     html = re.sub(r'<a href="(.*?)">(.*?)</a>', add_link_style, html)
     
     return html
-
 
 class UpdateDialog(QDialog):
     def __init__(self, parent=None, select_tab=None):
