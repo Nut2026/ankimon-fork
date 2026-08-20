@@ -1,4 +1,3 @@
-import re
 from aqt import mw
 from aqt.operations import QueryOp
 from pathlib import Path
@@ -62,6 +61,27 @@ def _start_query_op(parent, op, success, failure):
         failure(exc)
 
 
+import re
+from html import escape as _escape
+
+def _format_inline(text: str) -> str:
+    """
+    Apply inline formatting (bold, italic, strikethrough) to text.
+    """
+    # Bold
+    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'__(.*?)__', r'<b>\1</b>', text)
+    
+    # Italic
+    text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', text)
+    text = re.sub(r'_(.*?)_', r'<i>\1</i>', text)
+    
+    # Strikethrough
+    text = re.sub(r'~~(.*?)~~', r'<s>\1</s>', text)
+    
+    return text
+
+
 def markdown_to_html(text: str) -> str:
     """
     Convert basic Markdown to clean HTML for display in QTextBrowser.
@@ -69,8 +89,6 @@ def markdown_to_html(text: str) -> str:
     Makes all links clickable - both [text](url) format and plain URLs.
     Truncates content right before the "Download:" line (handles bold formatting).
     """
-    from html import escape as _escape
-    
     if not text:
         return ""
     
@@ -167,31 +185,15 @@ def markdown_to_html(text: str) -> str:
         bullet_match = re.match(r'^[-*•]\s+(.*)$', stripped)
         if bullet_match:
             content = bullet_match.group(1)
-            content = re.sub(r'(feat\([^)]*\)|fix\([^)]*\)|add\([^)]*\)|update\([^)]*\)):', r'<b>\1:</b>', content)
-            processed_lines.append(f'• {content}')
-            continue
-        
-        # Asterisk bullet points
-        asterisk_match = re.match(r'^\*\s+(.*)$', stripped)
-        if asterisk_match:
-            content = asterisk_match.group(1)
+            # Apply inline formatting to bullet content
+            content = _format_inline(content)
+            # Bold any "feat:" or "fix:" labels
             content = re.sub(r'(feat\([^)]*\)|fix\([^)]*\)|add\([^)]*\)|update\([^)]*\)):', r'<b>\1:</b>', content)
             processed_lines.append(f'• {content}')
             continue
         
         # Regular text - apply inline formatting
-        line_text = stripped
-        
-        # Bold
-        line_text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line_text)
-        line_text = re.sub(r'__(.*?)__', r'<b>\1</b>', line_text)
-        
-        # Italic
-        line_text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', line_text)
-        line_text = re.sub(r'_(.*?)_', r'<i>\1</i>', line_text)
-        
-        # Strikethrough
-        line_text = re.sub(r'~~(.*?)~~', r'<s>\1</s>', line_text)
+        line_text = _format_inline(stripped)
         
         processed_lines.append(line_text)
     
