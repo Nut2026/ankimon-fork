@@ -902,6 +902,17 @@ def apply_update(
             if message:
                 status_cb(message)
 
+    def submodule_progress(current: int, total: int):
+        """Map submodule download progress (0-100%) to the 97-99% range."""
+        if total > 0:
+            # Map 0-100% to 97-99% (leaving 100% for completion)
+            percent = int((current / total) * 100)
+            # Scale: 97% + (percent * 2 / 100) gives 97-99%
+            scaled = 97 + int((percent * 2) / 100)
+            # Clamp to 99% max
+            scaled = min(scaled, 99)
+            send_progress(scaled, 100, f"Downloading submodule... {percent}%")
+
     def cleanup():
         if os.path.exists(zip_path):
             try:
@@ -1052,11 +1063,13 @@ def apply_update(
             send_progress(95, 100, "Resolving submodule...")
             sub_sha = _fetch_submodule_sha(ref) or DEFAULT_SUBMODULE_SHA
 
-            log("Downloading poke_engine submodule package...")
+            # Download submodule with progress reporting (maps to 97-99%)
             send_progress(97, 100, "Downloading submodule...")
-
             _download_and_extract_submodule(
-                sub_sha, addon_dir / "poke_engine", status_cb
+                sub_sha,
+                addon_dir / "poke_engine",
+                status_cb=status_cb,
+                progress_cb=submodule_progress,
             )
 
             # --- Save update state if provided ---
