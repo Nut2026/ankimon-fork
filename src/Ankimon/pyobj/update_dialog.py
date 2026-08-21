@@ -1519,7 +1519,7 @@ class BranchUpdateProgressDialog(QDialog):
         btn_bg = "#3d3d3d" if is_dark else "#eeeeee"
         btn_hover = "#505050" if is_dark else "#e0e0e0"
         progress_text = "#ffffff" if is_dark else "#000000"
-        progress_chunk = "#3fb950" if is_dark else "#2da44e"
+        progress_chunk = "#2d8a4e" if is_dark else "#2da44e"
 
         self.setStyleSheet(f"""
             QDialog {{
@@ -1680,7 +1680,6 @@ class BranchUpdateProgressDialog(QDialog):
                 QMessageBox.warning(self, "Update Failed", msg)
 
         def on_failed(exc):
-            # Enable the Restart Anki button (with fallback for tests)
             if hasattr(self, 'btn_restart'):
                 self.btn_restart.setEnabled(True)
             if hasattr(self, 'btn_close'):
@@ -1711,20 +1710,21 @@ class BranchUpdateProgressDialog(QDialog):
     def _on_install_progress(self, percent: int):
         """Handle installation progress updates from apply_update.
 
-        Scales installation progress (0-95%) into the 40-100% range so that
-        the progress bar never reaches 100% until the entire update is complete.
-        Only updates the progress bar if the new value is higher than the
-        current value, ensuring the bar never moves backwards.
+        Scales manager progress (0-100%) into the 40-100% range so that
+        the progress bar only reaches 100% when the manager reports 100%
+        completion. Only updates the progress bar if the new value is
+        higher than the current value, ensuring the bar never moves backwards.
         """
-
-        if percent >= 0 and percent <= 95:
-            scaled_percent = self.INSTALL_PROGRESS_START + int(
-                (percent / 95) * (self.INSTALL_PROGRESS_MAX - self.INSTALL_PROGRESS_START)
-            )
-        elif percent > 95:
+        if percent < 0:
+            scaled_percent = self.INSTALL_PROGRESS_START
+        elif percent >= 100:
             scaled_percent = self.INSTALL_PROGRESS_MAX
         else:
-            scaled_percent = self.INSTALL_PROGRESS_START
+            scaled_percent = self.INSTALL_PROGRESS_START + int(
+                (percent / 100) * (self.INSTALL_PROGRESS_MAX - self.INSTALL_PROGRESS_START)
+            )
+
+        scaled_percent = min(scaled_percent, self.INSTALL_PROGRESS_MAX)
 
         if scaled_percent > self.progress_bar.value():
             self.progress_bar.setValue(scaled_percent)
