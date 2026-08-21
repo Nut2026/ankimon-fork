@@ -905,7 +905,6 @@ def apply_update(
     def submodule_progress(current: int, total: int):
         """Map submodule download progress (0-100%) to the 97-99% range."""
         if total > 0:
-            # Map 0-100% to 97-99% (leaving 100% for completion)
             percent = int((current / total) * 100)
             # Scale: 97% + (percent * 2 / 100) gives 97-99%
             scaled = 97 + int((percent * 2) / 100)
@@ -979,7 +978,6 @@ def apply_update(
             # Reserve 5% for the submodule phase at the end
             # So the main phases use 95% of the progress
             main_work_total = total_work
-            submodule_reserve = 5
             progress_scale = 95
 
             # --- Backup current code files ---
@@ -1063,7 +1061,8 @@ def apply_update(
             send_progress(95, 100, "Resolving submodule...")
             sub_sha = _fetch_submodule_sha(ref) or DEFAULT_SUBMODULE_SHA
 
-            # Download submodule with progress reporting (maps to 97-99%)
+            # Download submodule with byte-progress reporting (maps to 97-99%),
+            # reserving 100% for successful completion after extraction.
             send_progress(97, 100, "Downloading submodule...")
             _download_and_extract_submodule(
                 sub_sha,
@@ -1107,6 +1106,9 @@ def apply_update(
                 )
             except Exception as e:
                 print(f"Ankimon Updater: Could not date the install: {e}")
+
+            # Signal successful completion at 100%
+            send_progress(100, 100, "Update complete!")
 
             return (
                 True,
