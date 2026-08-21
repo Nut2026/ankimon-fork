@@ -1573,13 +1573,11 @@ class BranchUpdateProgressDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
+        # Create the Restart Anki button
         self.btn_restart = QPushButton("Restart Anki")
         self.btn_restart.setEnabled(False)
         self.btn_restart.clicked.connect(self.accept)
         btn_layout.addWidget(self.btn_restart)
-
-        # For test compatibility: alias btn_close to btn_restart
-        self.btn_close = self.btn_restart
 
         layout.addLayout(btn_layout)
         self.update_started = False
@@ -1648,8 +1646,9 @@ class BranchUpdateProgressDialog(QDialog):
             if success and pending_mod:
                 stamp_addon_mod(pending_mod)
 
-            self.btn_restart.setEnabled(True)
-            # For test compatibility: btn_close is an alias
+            # Enable the Restart Anki button (with fallback for tests)
+            if hasattr(self, 'btn_restart'):
+                self.btn_restart.setEnabled(True)
             if hasattr(self, 'btn_close'):
                 self.btn_close.setEnabled(True)
 
@@ -1669,7 +1668,9 @@ class BranchUpdateProgressDialog(QDialog):
                 QMessageBox.warning(self, "Update Failed", msg)
 
         def on_failed(exc):
-            self.btn_restart.setEnabled(True)
+            # Enable the Restart Anki button (with fallback for tests)
+            if hasattr(self, 'btn_restart'):
+                self.btn_restart.setEnabled(True)
             if hasattr(self, 'btn_close'):
                 self.btn_close.setEnabled(True)
             self.status_label.setText(
