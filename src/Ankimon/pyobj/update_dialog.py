@@ -1875,6 +1875,7 @@ def show_release_update_prompt(channel: str, release: dict):
         accent_green = "#3fb950"
         btn_bg = "rgba(88, 166, 255, 0.08)"
         btn_hover = "rgba(88, 166, 255, 0.18)"
+        update_btn_text = "#0d1117"
     else:
         bg = "#ffffff"
         bg_darker = "#f0f2f5"
@@ -1885,6 +1886,7 @@ def show_release_update_prompt(channel: str, release: dict):
         accent_green = "#2da44e"
         btn_bg = "rgba(9, 105, 218, 0.08)"
         btn_hover = "rgba(9, 105, 218, 0.18)"
+        update_btn_text = "#e6ffea"
     
     dialog.setStyleSheet(f"""
         QDialog {{
@@ -1933,7 +1935,7 @@ def show_release_update_prompt(channel: str, release: dict):
         QPushButton#updateBtn {{
             background: {accent_green};
             border: none;
-            color: #0d1117;
+            color: {update_btn_text};
             font-weight: 700;
         }}
         QPushButton#updateBtn:hover {{
