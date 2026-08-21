@@ -1489,6 +1489,12 @@ class BranchUpdatePromptDialog(QDialog):
 
 
 class BranchUpdateProgressDialog(QDialog):
+    """Dialog shown during the update process with progress bar and restart functionality."""
+
+    DOWNLOAD_PROGRESS_MAX = 40  # Download uses 0-40% of the total progress
+    INSTALL_PROGRESS_START = 40  # Installation starts at 40%
+    INSTALL_PROGRESS_MAX = 100  # Installation ends at 100%
+
     def __init__(self, branch_name: str, remote_sha: str, parent=None, release: dict = None):
         super().__init__(parent or mw)
         self.setWindowTitle("Updating Ankimon")
@@ -1512,7 +1518,7 @@ class BranchUpdateProgressDialog(QDialog):
         border = "#444444" if is_dark else "#e0e0e0"
         btn_bg = "#3d3d3d" if is_dark else "#eeeeee"
         btn_hover = "#505050" if is_dark else "#e0e0e0"
-        progress_text = "#000000" if is_dark else "#e6ffea"
+        progress_text = "#000000"
         progress_chunk = "#3fb950" if is_dark else "#2da44e"
 
         self.setStyleSheet(f"""
@@ -1573,10 +1579,9 @@ class BranchUpdateProgressDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
-        # Create the Restart Anki button
         self.btn_restart = QPushButton("Restart Anki")
         self.btn_restart.setEnabled(False)
-        self.btn_restart.clicked.connect(self.accept)
+        self.btn_restart.clicked.connect(self._restart_anki)
         btn_layout.addWidget(self.btn_restart)
 
         layout.addLayout(btn_layout)
@@ -1587,6 +1592,11 @@ class BranchUpdateProgressDialog(QDialog):
         if not self.update_started:
             self.update_started = True
             self.start_update()
+
+    def _restart_anki(self):
+        """Restart Anki after an update."""
+        from aqt import mw
+        mw.quit()
 
     def start_update(self):
         from .update_manager import (
@@ -1613,6 +1623,7 @@ class BranchUpdateProgressDialog(QDialog):
             def status_update(msg):
                 # Handle progress messages from the installation
                 if msg.startswith("__PROGRESS__"):
+                    # Catch only expected parsing errors; log diagnostics for malformed payloads
                     try:
                         _, progress_data = msg.split("__PROGRESS__", 1)
                         current, total = progress_data.split("|")
@@ -1620,8 +1631,9 @@ class BranchUpdateProgressDialog(QDialog):
                         total = int(total)
                         percent = int((current / total) * 100) if total > 0 else 0
                         mw.taskman.run_on_main(lambda: self._on_install_progress(percent))
-                    except Exception:
-                        pass
+                    except (ValueError, TypeError) as e:
+                        # Log the error but don't crash the update
+                        print(f"Ankimon Updater: Malformed progress message: {msg}, error: {e}")
                 else:
                     # Regular status message
                     mw.taskman.run_on_main(lambda: self.status_label.setText(msg))
@@ -1686,19 +1698,36 @@ class BranchUpdateProgressDialog(QDialog):
         _start_query_op(self, bg, on_done, on_failed)
 
     def on_progress(self, current: int, total: int):
-        """Handle download progress updates from _download_zip_to_temp."""
+        """Handle download progress updates from _download_zip_to_temp.
+
+        Scales download progress (0-100%) into the 0-40% range to reserve
+        space for installation progress.
+        """
         if total > 0:
             percent = int((current / total) * 100)
-            mw.taskman.run_on_main(lambda: self.progress_bar.setValue(percent))
+            scaled_percent = int((percent / 100) * self.DOWNLOAD_PROGRESS_MAX)
+            mw.taskman.run_on_main(lambda: self.progress_bar.setValue(scaled_percent))
 
     def _on_install_progress(self, percent: int):
         """Handle installation progress updates from apply_update.
 
+        Scales installation progress (0-95%) into the 40-100% range so that
+        the progress bar never reaches 100% until the entire update is complete.
         Only updates the progress bar if the new value is higher than the
         current value, ensuring the bar never moves backwards.
         """
-        if percent > self.progress_bar.value():
-            self.progress_bar.setValue(percent)
+
+        if percent >= 0 and percent <= 95:
+            scaled_percent = self.INSTALL_PROGRESS_START + int(
+                (percent / 95) * (self.INSTALL_PROGRESS_MAX - self.INSTALL_PROGRESS_START)
+            )
+        elif percent > 95:
+            scaled_percent = self.INSTALL_PROGRESS_MAX
+        else:
+            scaled_percent = self.INSTALL_PROGRESS_START
+
+        if scaled_percent > self.progress_bar.value():
+            self.progress_bar.setValue(scaled_percent)
 
 def show_branch_update_prompt(
     branch_name: str, remote_sha: str, commits: list[dict] = None
