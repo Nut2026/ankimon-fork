@@ -1518,7 +1518,7 @@ class BranchUpdateProgressDialog(QDialog):
         border = "#444444" if is_dark else "#e0e0e0"
         btn_bg = "#3d3d3d" if is_dark else "#eeeeee"
         btn_hover = "#505050" if is_dark else "#e0e0e0"
-        progress_text = "#000000"
+        progress_text = "#ffffff" if is_dark else "#000000"
         progress_chunk = "#3fb950" if is_dark else "#2da44e"
 
         self.setStyleSheet(f"""
