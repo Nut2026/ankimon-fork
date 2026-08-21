@@ -820,7 +820,7 @@ def _fetch_submodule_sha(ref: str) -> Optional[str]:
     return None
 
 
-def _download_and_extract_submodule(sha: str, dest_dir: Path, status_cb=None):
+def _download_and_extract_submodule(sha: str, dest_dir: Path, status_cb=None, progress_cb=None):
     def log(msg):
         if status_cb:
             status_cb(msg)
@@ -828,7 +828,7 @@ def _download_and_extract_submodule(sha: str, dest_dir: Path, status_cb=None):
     url = f"https://github.com/ArdentRoe/poke-engine/archive/{sha}.zip"
     log("Downloading poke_engine submodule package...")
 
-    zip_path = _download_zip_to_temp(url)
+    zip_path = _download_zip_to_temp(url, progress_cb=progress_cb)
     if not zip_path:
         raise Exception("Failed to download poke_engine submodule zip archive.")
 
