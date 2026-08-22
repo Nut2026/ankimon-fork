@@ -50,6 +50,15 @@ try:
 except ImportError:
     icon_path = None
 
+# GUI availability flag for headless environments
+GUI_AVAILABLE = True
+try:
+    from aqt import mw
+    from aqt.operations import QueryOp
+except ImportError:
+    GUI_AVAILABLE = False
+    # If running headless, these will be handled gracefully
+
 def _start_query_op(parent, op, success, failure):
     try:
         QueryOp(
@@ -103,12 +112,14 @@ def markdown_to_html(text: str) -> str:
         """
         Handle Markdown links: [text](url) - convert to HTML links
         """
-        text_content = match.group(1)
+        text_content = match.group(1)  # Already escaped from initial _escape(text)
         url = match.group(2)
         # Only allow http/https schemes for security
         if not re.match(r'https?://', url, re.IGNORECASE):
             return _escape(match.group(0))
-        return f'<a href="{_escape(url, quote=True)}">{_escape(text_content)}</a>'
+        # Use html.escape for URL to ensure it's safe, text_content is already escaped
+        safe_url = _escape(url, quote=True)
+        return f'<a href="{safe_url}">{text_content}</a>'
     
     text = re.sub(r'\[(.*?)\]\((.*?)\)', fix_markdown_link, text)
     
@@ -120,8 +131,9 @@ def markdown_to_html(text: str) -> str:
         # Only allow http/https schemes for security
         if not re.match(r'https?://', url, re.IGNORECASE):
             return _escape(url)
+        # url is already escaped from initial _escape(text)
         safe_url = _escape(url, quote=True)
-        return f'<a href="{safe_url}">{safe_url} (open in external tab)</a>'
+        return f'<a href="{safe_url}">{url}</a>'
     
     # Match URLs that aren't already inside an <a> tag
     url_pattern = r'https?://[^\s<>"\'()]+'
@@ -1976,8 +1988,11 @@ def show_release_update_prompt(channel: str, release: dict):
     layout.setContentsMargins(24, 24, 24, 24)
     layout.setSpacing(16)
     
+    # Escape dynamic content to prevent HTML injection
+    escaped_channel = _escape(channel)
+    escaped_tag = _escape(tag)
     title_label = QLabel(
-        f"<span style='font-size: 1.2rem; font-weight: 800; letter-spacing: -0.3px; color: {text};'>A new <b>{channel}</b> release is available: <b>{tag}</b></span>"
+        f"<span style='font-size: 1.2rem; font-weight: 800; letter-spacing: -0.3px; color: {text};'>A new <b>{escaped_channel}</b> release is available: <b>{escaped_tag}</b></span>"
     )
     title_label.setWordWrap(True)
     layout.addWidget(title_label)
