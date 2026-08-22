@@ -96,7 +96,10 @@ def markdown_to_html(text: str) -> str:
     text = _escape(text)
     
     # Look for patterns like "Download:", "**Download:**", "**Download**:", etc.
-    download_match = re.search(r'\n\s*[*]*Download[*]*:\s*https?://', text, re.IGNORECASE)
+    download_match = re.search(
+        r'(?im)^\s*(?:\*{1,3})?Download(?:\*{1,3})?:',
+        text,
+    )
     if download_match:
         text = text[:download_match.start()]
         text = text.rstrip()
