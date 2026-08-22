@@ -152,15 +152,15 @@ def markdown_to_html(text: str) -> str:
         # Headers
         if re.match(r'^###\s+', stripped):
             content = re.sub(r'^###\s+', '', stripped)
-            processed_lines.append(f'<b>{content}</b>')
+            processed_lines.append(f'<b>{_format_inline(content)}</b>')
             continue
         elif re.match(r'^##\s+', stripped):
             content = re.sub(r'^##\s+', '', stripped)
-            processed_lines.append(f'<b>{content}</b>')
+            processed_lines.append(f'<b>{_format_inline(content)}</b>')
             continue
         elif re.match(r'^#\s+', stripped):
             content = re.sub(r'^#\s+', '', stripped)
-            processed_lines.append(f'<b>{content}</b>')
+            processed_lines.append(f'<b>{_format_inline(content)}</b>')
             continue
         
         # Horizontal rules
