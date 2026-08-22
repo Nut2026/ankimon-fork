@@ -50,14 +50,12 @@ try:
 except ImportError:
     icon_path = None
 
-# GUI availability flag for headless environments
 GUI_AVAILABLE = True
 try:
     from aqt import mw
     from aqt.operations import QueryOp
 except ImportError:
     GUI_AVAILABLE = False
-    # If running headless, these will be handled gracefully
 
 def _start_query_op(parent, op, success, failure):
     try:
@@ -77,13 +75,9 @@ def _format_inline(text: str) -> str:
     """
     Apply inline formatting (bold, italic, strikethrough) to text.
     """
-    # Bold (asterisk only)
+    
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
-    
-    # Italic (asterisk only)
     text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', text)
-    
-    # Strikethrough
     text = re.sub(r'~~(.*?)~~', r'<s>\1</s>', text)
     
     return text
@@ -99,7 +93,6 @@ def markdown_to_html(text: str) -> str:
     if not text:
         return ""
     
-    # First, escape HTML entities in the remote text to prevent injection
     text = _escape(text)
     
     # Look for patterns like "Download:", "**Download:**", "**Download**:", etc.
@@ -112,12 +105,11 @@ def markdown_to_html(text: str) -> str:
         """
         Handle Markdown links: [text](url) - convert to HTML links
         """
-        text_content = match.group(1)  # Already escaped from initial _escape(text)
+        text_content = match.group(1)
         url = match.group(2)
         # Only allow http/https schemes for security
         if not re.match(r'https?://', url, re.IGNORECASE):
             return _escape(match.group(0))
-        # Use html.escape for URL to ensure it's safe, text_content is already escaped
         safe_url = _escape(url, quote=True)
         return f'<a href="{safe_url}">{text_content}</a>'
     
@@ -128,10 +120,8 @@ def markdown_to_html(text: str) -> str:
         Handle plain URLs - convert to clickable links
         """
         url = match.group(0)
-        # Only allow http/https schemes for security
         if not re.match(r'https?://', url, re.IGNORECASE):
             return _escape(url)
-        # url is already escaped from initial _escape(text)
         safe_url = _escape(url, quote=True)
         return f'<a href="{safe_url}">{url}</a>'
     
@@ -141,13 +131,11 @@ def markdown_to_html(text: str) -> str:
     processed_parts = []
     for part in parts:
         if part.startswith('<a'):
-            # These are safe anchors we just created
             processed_parts.append(part)
         else:
             processed_parts.append(re.sub(url_pattern, fix_plain_url, part))
     text = ''.join(processed_parts)
     
-    # Process line by line, preserving structure
     lines = text.split('\n')
     processed_lines = []
     
@@ -172,7 +160,7 @@ def markdown_to_html(text: str) -> str:
             processed_lines.append(f'<b>{content}</b>')
             continue
         
-        # Horizontal rules - clean separators with minimal spacing
+        # Horizontal rules
         if stripped in ['---', '___', '***']:
             processed_lines.append('<hr style="border: none; border-top: 1px solid #444; margin: 4px 0;">')
             continue
@@ -188,7 +176,7 @@ def markdown_to_html(text: str) -> str:
             processed_lines.append(f'• {content}')
             continue
         
-        # Regular text - apply inline formatting
+        # Regular text
         line_text = _format_inline(stripped)
         
         processed_lines.append(line_text)
