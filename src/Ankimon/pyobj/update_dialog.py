@@ -1596,7 +1596,7 @@ class BranchUpdateProgressDialog(QDialog):
     def _restart_anki(self):
         """Restart Anki after an update."""
         from aqt import mw
-        mw.quit()
+        mw.close()
 
     def start_update(self):
         from .update_manager import (
