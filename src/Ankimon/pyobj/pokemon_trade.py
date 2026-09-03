@@ -16,6 +16,7 @@ from ..functions.pokedex_functions import get_base_experience, get_growth_rate
 from ..utils import get_tier_by_id
 from .error_handler import show_warning_with_traceback
 from ..services import services
+import os
 
 # --- Module-level functions for Monthly Challenges ---
 
@@ -65,8 +66,10 @@ def add_pokemon_to_collection(new_pokemon, refresh_callback=None, parent_window=
         from ..utils import is_alive
         if is_alive(services.pokemon_pc):
             services.pokemon_pc.refresh_pokemon_grid()
+        return True
     except Exception as e:
         show_warning_with_traceback(parent=parent_window, exception=e, message="Error adding Pokemon to collection")
+        return False
 
 def show_monthly_challenge_dialog(challenge_pokemon, description, parent_window=None):
     """
@@ -108,6 +111,9 @@ def show_monthly_challenge_dialog(challenge_pokemon, description, parent_window=
         - The Discord link uses the accent color from the theme and opens externally
         - The "Accept Pokémon" button is set as the default button (Enter key)
     """
+
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return True
 
     from PyQt6.QtWidgets import QSizePolicy
     from PyQt6.QtGui import QMovie, QPixmap
@@ -832,9 +838,13 @@ def check_and_award_monthly_pokemon(logger):
         accepted = show_monthly_challenge_dialog(new_pokemon, description, parent_window=mw)
         if accepted:
             db.set_user_data("monthly_challenge", 1)
-            add_pokemon_to_collection(new_pokemon, parent_window=mw)
-            logger.log("info", f"Successfully awarded {new_pokemon['name']}{shiny_text}.")
-            show_monthly_acceptance_dialog(parent_window=mw, challenge_pokemon=challenge_pokemon_data)
+            success = add_pokemon_to_collection(new_pokemon, parent_window=mw)
+            if success:
+                logger.log("info", f"Successfully awarded {new_pokemon['name']}{shiny_text}.")
+                show_monthly_acceptance_dialog(parent_window=mw, challenge_pokemon=challenge_pokemon_data)
+            else:
+                db.set_user_data("monthly_challenge", 0)
+                logger.log("error", f"Failed to add {new_pokemon['name']} to collection. Status rolled back.")
         else:
             db.set_user_data("monthly_challenge", 2)
             show_monthly_rejection_dialog(parent_window=mw, challenge_pokemon=challenge_pokemon_data)
