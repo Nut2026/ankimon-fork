@@ -394,5 +394,5 @@ def test_sprite_visibility_web_override_metadata_and_scope_are_wired():
     assert "SCREEN_ANKIDEX" in allowlist
     assert "SCREEN_PROFILE" in allowlist
     assert "SCREEN_TEAM" in allowlist
-    assert "SCREEN_MOBILE" not in allowlist
-    assert "SCREEN_HISTORY" not in allowlist
+    assert "SCREEN_MOBILE" in allowlist
+    assert "SCREEN_HISTORY" in allowlist
