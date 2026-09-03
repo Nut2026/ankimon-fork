@@ -1,6 +1,7 @@
-"""Unified shell window — Items (Mart + Bag) and Ankidex live in one QDialog.
+"""Unified shell window — Items (Mart + Bag), Ankidex, Profile, Team, Settings, 
+Monthly Challenge, and Mobile all live in one QDialog.
 
-The same QWebEngineView swaps between two screens by changing its URL. No
+The same QWebEngineView swaps between screens by changing its URL. No
 window close/open flicker; the dropdown switcher in either screen calls back
 through QWebChannel to swap content in place.
 """
@@ -14,9 +15,10 @@ import traceback
 import threading
 import base64
 from datetime import datetime
+import requests
 from aqt import QDialog, QVBoxLayout, QWebEngineView, QWebEnginePage, mw
 from aqt.qt import Qt, QUrl, QFrame, QWebEngineProfile
-from PyQt6.QtCore import QObject, pyqtSlot, QTimer, QByteArray
+from PyQt6.QtCore import QObject, pyqtSlot, QTimer, QByteArray, QVariant
 from PyQt6.QtGui import QColor
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWidgets import QStackedWidget
@@ -32,7 +34,7 @@ except ImportError:  # dev helper not landed yet (thread-reload-and-misc-utils u
         return False
 
 
-from ..resources import items_path, csv_file_items_cost, csv_file_descriptions
+from ..resources import items_path, csv_file_items_cost, csv_file_descriptions, icon_path
 
 
 class SafeWebEnginePage(QWebEnginePage):
@@ -86,8 +88,8 @@ from ..events import events
 # NOTE: functions/mobile_sync.py is a later (mobile) unit and is intentionally
 # NOT a module-load dependency of the web-shell host. The MobileBridge slots
 # lazy-import it in-method and degrade to a benign/neutral payload when it is
-# absent, so the host, shop, settings, profile and team screens all work with
-# mobile not yet installed.
+# absent, so the host, shop, settings, profile, team, and monthly challenge 
+# screens all work with mobile not yet installed.
 
 
 SCREEN_ITEMS = "items"
@@ -97,6 +99,7 @@ SCREEN_PROFILE = "profile"
 SCREEN_TEAM = "team"
 SCREEN_MOBILE = "mobile"
 SCREEN_HISTORY = "history"
+SCREEN_MONTHLY = "monthly"
 
 SPRITE_VISIBILITY_SCREENS = (
     SCREEN_ITEMS,
@@ -104,6 +107,7 @@ SPRITE_VISIBILITY_SCREENS = (
     SCREEN_SETTINGS,
     SCREEN_PROFILE,
     SCREEN_TEAM,
+    SCREEN_MONTHLY,
 )
 
 
@@ -149,6 +153,10 @@ class NavBridge(QObject):
     @pyqtSlot()
     def openHistory(self):
         self._w.load_screen(SCREEN_HISTORY)
+    
+    @pyqtSlot()
+    def openMonthly(self):
+        self._w.load_screen(SCREEN_MONTHLY)
 
 
 class TrainerBridge(QObject):
@@ -1023,6 +1031,28 @@ class MobileBridge(QObject):
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+class MonthlyBridge(QObject):
+    """Monthly Challenge screen data and collection actions."""
+
+    def __init__(self, window):
+        super().__init__()
+        self._w = window
+
+    @pyqtSlot(result="QVariant")
+    def getMonthlyChallenge(self):
+        return self._w.get_monthly_challenge_data()
+
+    @pyqtSlot(result="QVariant")
+    def receiveMon(self):
+        result = self._w.receive_monthly_challenge_mon()
+        self._w.push_screen_data()
+        return result
+
+    @pyqtSlot(result="QVariant")
+    def removeMon(self):
+        result = self._w.remove_monthly_challenge_mon()
+        self._w.push_screen_data()
+        return result
 
 class AnkimonItemsWeb(QDialog):
     def __init__(
@@ -1070,6 +1100,7 @@ class AnkimonItemsWeb(QDialog):
             SCREEN_PROFILE: self._push_profile_live,
             SCREEN_MOBILE: self._push_mobile_live,
             SCREEN_HISTORY: self._push_history_live,
+            SCREEN_MONTHLY: self._push_monthly_live,
         }
         self._live_refresh_pending = False
         self.current_screen = None
@@ -1150,6 +1181,13 @@ class AnkimonItemsWeb(QDialog):
                 self.profile, SCREEN_HISTORY, logger, self.webview_history
             )
         )
+
+        self.webview_monthly = QWebEngineView()
+        self.webview_monthly.setPage(
+            SafeWebEnginePage(
+                self.profile, SCREEN_MONTHLY, logger, self.webview_monthly
+            )
+        )
         self._views = {
             SCREEN_ITEMS: self.webview_items,
             SCREEN_ANKIDEX: self.webview_ankidex,
@@ -1158,6 +1196,7 @@ class AnkimonItemsWeb(QDialog):
             SCREEN_TEAM: self.webview_team,
             SCREEN_MOBILE: self.webview_mobile,
             SCREEN_HISTORY: self.webview_history,
+            SCREEN_MONTHLY: self.webview_monthly,
         }
 
         self.bridge = ItemsBridge(self)
@@ -1166,6 +1205,7 @@ class AnkimonItemsWeb(QDialog):
         self.trainer_bridge = TrainerBridge(self)
         self.team_bridge = TeamBridge(self)
         self._mobile_bridge = MobileBridge(self)
+        self.monthly_bridge = MonthlyBridge(self)
 
         # Each screen gets its own channel, but every channel registers the
         # same bridge objects so any page can navigate / call any action.
@@ -1180,6 +1220,7 @@ class AnkimonItemsWeb(QDialog):
             channel.registerObject("settings", self.settings_bridge)
             channel.registerObject("trainer", self.trainer_bridge)
             channel.registerObject("team", self.team_bridge)
+            channel.registerObject("monthly", self.monthly_bridge)
             if screen in (SCREEN_MOBILE, SCREEN_HISTORY):
                 channel.registerObject("mobile", self._mobile_bridge)
             view.page().setWebChannel(channel)
@@ -1239,6 +1280,10 @@ class AnkimonItemsWeb(QDialog):
                 title = "Ankimon — Mobile History"
                 target_view = self.webview_history
                 path = self.addon_dir / "ankimon_mobile_web" / "history.html"
+            elif screen == SCREEN_MONTHLY:
+                title = "Ankimon — Monthly Challenge"
+                target_view = self.webview_monthly
+                path = self.addon_dir / "ankimon_monthly_challenge_web" / "monthly.html"
             else:
                 return
 
@@ -1362,6 +1407,10 @@ class AnkimonItemsWeb(QDialog):
             data = db.get_mobile_history() if db is not None else []
             js = f"if (window.initializeHistory) window.initializeHistory({json.dumps(data)});"
             self.webview_history.page().runJavaScript(js)
+        elif self.current_screen == SCREEN_MONTHLY:
+            data = self.get_monthly_challenge_data()
+            js = f"if (window.initializeMonthlyChallenge) window.initializeMonthlyChallenge({json.dumps(data)});"
+            self.webview_monthly.page().runJavaScript(js)
 
     def get_profile_payload(self):
         """Profile data + a one-shot UI action ('sprite' opens the picker,
@@ -1480,6 +1529,15 @@ class AnkimonItemsWeb(QDialog):
             f"window.liveRefreshHistory({json.dumps(history_data)});"
         )
         self.webview_history.page().runJavaScript(js)
+
+    def _push_monthly_live(self):
+        """Push a live refresh to the Monthly Challenge screen."""
+        data = self.get_monthly_challenge_data()
+        js = (
+            "if (window.liveRefreshMonthly) "
+            f"window.liveRefreshMonthly({json.dumps(data)});"
+        )
+        self.webview_monthly.page().runJavaScript(js)
 
     def _get_ankidex_data(self):
         # Reuse the existing Ankidex singleton's data getter — keeps the
@@ -1610,6 +1668,342 @@ class AnkimonItemsWeb(QDialog):
         # Sort by name alphabetically
         results.sort(key=lambda r: r["name"].lower())
         return {"results": results}
+
+    def _get_monthly_challenge_context(self):
+        month = datetime.now().strftime("%B %Y")
+        url = "https://raw.githubusercontent.com/h0tp-ftw/ankimon/refs/heads/main/assets/challenges/monthly_challenges.json"
+        response = requests.get(url, timeout=2)
+        response.raise_for_status()
+        challenge = next((item for item in response.json() if item.get("month") == month), None)
+        if not challenge or not challenge.get("pokemon"):
+            raise ValueError(f"No monthly challenge found for {month}")
+
+        pokemon_data = challenge["pokemon"]
+        individual_id = pokemon_data.get("individual_id")
+        if not individual_id:
+            raise ValueError("Monthly challenge Pokémon is missing individual_id")
+
+        db = services.db
+        last_id = db.get_user_data("monthly_challenge_id")
+        if str(last_id) != str(individual_id):
+            db.set_user_data("monthly_challenge_id", individual_id)
+            db.set_user_data("monthly_challenge", 0)
+        try:
+            status = int(db.get_user_data("monthly_challenge", 0))
+        except (TypeError, ValueError):
+            status = 0
+        return challenge, pokemon_data, individual_id, status
+
+    def get_monthly_challenge_data(self):
+        """Fetch monthly challenge data from the live JSON file and compute results."""
+        try:
+            from ..functions.sprite_functions import get_relative_sprite_path
+            from datetime import datetime
+            import requests
+            import json
+            
+            # Fetch the live monthly challenges JSON
+            url = "https://raw.githubusercontent.com/h0tp-ftw/ankimon/refs/heads/main/assets/challenges/monthly_challenges.json"
+            response = requests.get(url, timeout=5)
+            response.raise_for_status()
+            all_challenges = response.json()
+            
+            # Get current month
+            current_month = datetime.now().strftime("%B %Y")
+            
+            # Get current challenge status from DB
+            db = services.db
+            current_individual_id = None
+            current_status = 0
+            
+            # Find the current month's challenge
+            current_challenge = next((c for c in all_challenges if c.get("month") == current_month), None)
+            if current_challenge and current_challenge.get("pokemon"):
+                current_individual_id = current_challenge["pokemon"].get("individual_id")
+                if current_individual_id:
+                    last_id = db.get_user_data("monthly_challenge_id")
+                    if str(last_id) != str(current_individual_id):
+                        db.set_user_data("monthly_challenge_id", current_individual_id)
+                        db.set_user_data("monthly_challenge", 0)
+                    try:
+                        current_status = int(db.get_user_data("monthly_challenge", 0))
+                    except (TypeError, ValueError):
+                        current_status = 0
+            
+            # Get sprite visibility setting
+            show_sprites = True
+            try:
+                settings_obj = services.settings
+                if settings_obj is not None:
+                    show_sprites = settings_obj.get("gui.show_sprites_across_ankimon", True)
+            except Exception:
+                pass
+            
+            # Query the database for the current month's Pokémon if it exists
+            collection_pokemon = None
+            if current_individual_id:
+                collection_pokemon = db.get_pokemon(current_individual_id)
+            
+            # Pre-fetch all Pokémon in the user's collection by individual_id for quick lookup
+            all_pokemon_in_collection = {}
+            try:
+                all_pokemon = db.get_all_pokemon() or []
+                for p in all_pokemon:
+                    ind_id = p.get("individual_id")
+                    if ind_id:
+                        all_pokemon_in_collection[ind_id] = p
+            except Exception as e:
+                logger = services.logger
+                if logger:
+                    logger.log("error", f"Failed to fetch all Pokémon: {e}")
+            
+            # Build the challenge list
+            challenges_list = []
+            logger = services.logger
+            
+            for idx, c in enumerate(all_challenges):
+                month = c.get("month", "")
+                pokemon = c.get("pokemon", {})
+                pokemon_id = pokemon.get("individual_id")
+                name = pokemon.get("name", "Unknown")
+                description = c.get("description", "")
+                pokedex_id = pokemon.get("id", 0)
+                shiny_template = bool(pokemon.get("shiny", False))
+                gender = pokemon.get("gender", "N")
+                level = pokemon.get("level", 1)
+                stats = pokemon.get("stats", {})
+                types = pokemon.get("type", ["Normal"])
+                defeated = pokemon.get("pokemon_defeated", 0)
+                
+                is_current = (month == current_month)
+                
+                # Get sprites - only if show_sprites is True
+                sprite_png = None
+                sprite_gif = None
+                if show_sprites:
+                    try:
+                        sprite_png = get_relative_sprite_path(
+                            pokedex_id,
+                            shiny_template,
+                            gender,
+                            name,
+                            "png",
+                        )
+                        sprite_gif = get_relative_sprite_path(
+                            pokedex_id,
+                            shiny_template,
+                            gender,
+                            name,
+                            "gif",
+                        )
+                    except Exception:
+                        sprite_png = f"../user_files/sprites/front_default/{pokedex_id}.png"
+                        sprite_gif = f"../user_files/sprites/front_default/{pokedex_id}.gif"
+                
+                entry = {
+                    "month": month,
+                    "name": name,
+                    "individual_id": pokemon_id,
+                    "pokedex_id": pokedex_id,
+                    "sprite": sprite_png,
+                    "sprite_gif": sprite_gif,
+                    "description": description or "",
+                    "is_current": is_current,
+                    "show_sprites": show_sprites,
+                    "shiny": shiny_template,
+                    "gender": gender,
+                    "level": level,
+                    "stats": stats,
+                    "type": types,
+                    "pokemon_defeated": defeated,
+                }
+                
+                # Check if this month's Pokémon is in the user's collection
+                month_pokemon_in_collection = all_pokemon_in_collection.get(pokemon_id) if pokemon_id else None
+                
+                if is_current and pokemon_id:
+                    # CURRENT month - determine Status
+                    if collection_pokemon:
+                        # Pokémon is in collection - Status: Accepted
+                        entry["status"] = 1  # Accepted
+                        entry["in_collection"] = True
+                        entry["collection_level"] = collection_pokemon.get("level", level)
+                        entry["collection_pokedex_id"] = collection_pokemon.get("id", pokedex_id)
+                        entry["collection_shiny"] = collection_pokemon.get("shiny", False)
+                        entry["collection_gender"] = collection_pokemon.get("gender", gender)
+                        entry["collection_name"] = collection_pokemon.get("name", name)
+                        entry["collection_stats"] = collection_pokemon.get("stats", stats)
+                        entry["collection_types"] = collection_pokemon.get("type", types)
+                        entry["collection_defeated"] = collection_pokemon.get("pokemon_defeated", 0)
+                        
+                        # Get evolved sprite if applicable
+                        evolved_id = collection_pokemon.get("id", pokedex_id)
+                        evolved_shiny = collection_pokemon.get("shiny", False)
+                        evolved_gender = collection_pokemon.get("gender", gender)
+                        evolved_name = collection_pokemon.get("name", name)
+                        
+                        if show_sprites:
+                            try:
+                                entry["collection_sprite_gif"] = get_relative_sprite_path(
+                                    evolved_id,
+                                    evolved_shiny,
+                                    evolved_gender,
+                                    evolved_name,
+                                    "gif",
+                                )
+                                entry["collection_sprite_png"] = get_relative_sprite_path(
+                                    evolved_id,
+                                    evolved_shiny,
+                                    evolved_gender,
+                                    evolved_name,
+                                    "png",
+                                )
+                            except Exception:
+                                entry["collection_sprite_gif"] = f"../user_files/sprites/front_default/{evolved_id}.gif"
+                                entry["collection_sprite_png"] = f"../user_files/sprites/front_default/{evolved_id}.png"
+                        
+                        entry["has_evolved"] = (evolved_id != pokedex_id)
+                    else:
+                        # Pokémon not in collection - Status: Rejected
+                        entry["status"] = 2  # Rejected
+                        entry["in_collection"] = False
+                        entry["collection_level"] = level
+                        entry["collection_pokedex_id"] = pokedex_id
+                        entry["collection_shiny"] = shiny_template
+                        entry["collection_gender"] = gender
+                        entry["collection_name"] = name
+                        entry["collection_stats"] = stats
+                        entry["collection_types"] = types
+                        entry["collection_defeated"] = 0
+                        entry["collection_sprite_gif"] = sprite_gif
+                        entry["collection_sprite_png"] = sprite_png
+                        entry["has_evolved"] = False
+                else:
+                    # PAST challenges - determine Result
+                    # Check if this month's Pokémon is in the collection
+                    is_collected = month_pokemon_in_collection is not None
+                    
+                    # Check if next month's Pokémon exists
+                    next_challenge = all_challenges[idx + 1] if idx + 1 < len(all_challenges) else None
+                    next_individual_id = next_challenge.get("pokemon", {}).get("individual_id") if next_challenge else None
+                    next_pokemon_in_db = all_pokemon_in_collection.get(next_individual_id) if next_individual_id else None
+                    
+                    if is_collected and next_pokemon_in_db is None:
+                        # Month A's ID is present, Month B's ID is NOT present → Pending: Accepted
+                        entry["result"] = "pending_accepted"
+                        if logger:
+                            logger.log("debug", f"[Monthly] {month}: → Pending: Accepted")
+                    elif not is_collected and next_pokemon_in_db is None:
+                        # Month A's ID is NOT present, Month B's ID is NOT present → Pending: Rejected
+                        entry["result"] = "pending_rejected"
+                        if logger:
+                            logger.log("debug", f"[Monthly] {month}: → Pending: Rejected")
+                    elif not is_collected:
+                        # ID not in collection → Rejected
+                        entry["result"] = "rejected"
+                        if logger:
+                            logger.log("debug", f"[Monthly] {month}: NOT in collection → Rejected")
+                    else:
+                        # ID IS in collection → Check if next month's Pokémon is shiny
+                        next_is_shiny = False
+                        if next_pokemon_in_db:
+                            raw_shiny = next_pokemon_in_db.get("shiny", False)
+                            # Handle both boolean and integer storage
+                            if isinstance(raw_shiny, bool):
+                                next_is_shiny = raw_shiny
+                            elif isinstance(raw_shiny, int):
+                                next_is_shiny = raw_shiny == 1
+                            elif isinstance(raw_shiny, str):
+                                next_is_shiny = raw_shiny.lower() in ("true", "1")
+                            else:
+                                next_is_shiny = bool(raw_shiny)
+                        
+                        # CRITICAL: Log everything for debugging
+                        if logger:
+                            next_month_name = next_challenge.get("month", "None") if next_challenge else "None"
+                            logger.log("debug", f"[Monthly] ===== CHECKING {month} =====")
+                            logger.log("debug", f"[Monthly] current_month_in_db: {is_collected}")
+                            logger.log("debug", f"[Monthly] next_month: {next_month_name}")
+                            logger.log("debug", f"[Monthly] next_individual_id: {next_individual_id}")
+                            logger.log("debug", f"[Monthly] next_pokemon_in_db: {next_pokemon_in_db is not None}")
+                            if next_pokemon_in_db:
+                                logger.log("debug", f"[Monthly] next_pokemon shiny raw value: {next_pokemon_in_db.get('shiny', 'NOT FOUND')}")
+                                logger.log("debug", f"[Monthly] next_pokemon name: {next_pokemon_in_db.get('name', 'UNKNOWN')}")
+                            logger.log("debug", f"[Monthly] next_is_shiny: {next_is_shiny}")
+                        
+                        if next_pokemon_in_db and next_is_shiny:
+                            # Current month's ID is in collection AND next month's Mon is in collection AND shiny → Succeeded!
+                            entry["result"] = "success"
+                            if logger:
+                                logger.log("debug", f"[Monthly] {month}: → SUCCEEDED!")
+                        elif next_pokemon_in_db and not next_is_shiny:
+                            # Current month's ID is in collection AND next month's Mon is in collection BUT NOT shiny → Next time's a charm!
+                            entry["result"] = "next_time"
+                            if logger:
+                                logger.log("debug", f"[Monthly] {month}: → NEXT TIME'S A CHARM!")
+                        else:
+                            # Current month's ID is in collection but next month's Mon is not collected → Accepted
+                            entry["result"] = "accepted"
+                            if logger:
+                                logger.log("debug", f"[Monthly] {month}: → Accepted")
+                
+                challenges_list.append(entry)
+            
+            return {
+                "ok": True,
+                "current_month": current_month,
+                "current_individual_id": current_individual_id,
+                "current_status": current_status,
+                "show_sprites": show_sprites,
+                "challenges": challenges_list,
+            }
+            
+        except requests.exceptions.RequestException as e:
+            return {"ok": False, "message": f"Could not fetch monthly challenges: {e}"}
+        except Exception as e:
+            import traceback
+            logger = services.logger
+            if logger:
+                logger.log("error", f"get_monthly_challenge_data failed: {e}\n{traceback.format_exc()}")
+            return {"ok": False, "message": str(e)}
+
+    def _build_monthly_pokemon(self, challenge, pokemon_data):
+        make_shiny = False
+        previous_id = challenge.get("previous_challenge_individual_id")
+        threshold = challenge.get("defeat_threshold")
+        if previous_id and threshold:
+            previous = services.db.get_pokemon(previous_id)
+            if previous:
+                try:
+                    make_shiny = int(previous.get("pokemon_defeated", 0)) >= int(threshold)
+                except (TypeError, ValueError):
+                    pass
+        from ..pyobj.pokemon_trade import create_monthly_challenge_pokemon
+        return create_monthly_challenge_pokemon(pokemon_data, make_shiny=make_shiny)
+
+    def receive_monthly_challenge_mon(self):
+        try:
+            challenge, pokemon_data, individual_id, status = self._get_monthly_challenge_context()
+            db = services.db
+            if status == 1 and db.get_pokemon(individual_id) is not None:
+                return {"ok": True, "message": "Your Monthly Challenge Pokémon is already in your collection."}
+            if db.get_pokemon(individual_id) is None:
+                db.save_pokemon(self._build_monthly_pokemon(challenge, pokemon_data))
+            db.set_user_data("monthly_challenge", 1)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "message": str(e)}
+
+    def remove_monthly_challenge_mon(self):
+        try:
+            _, _, individual_id, status = self._get_monthly_challenge_context()
+            if status != 1:
+                return {"ok": False, "message": "The Monthly Challenge Pokémon is not currently accepted."}
+            removed = services.db.delete_pokemon(individual_id)
+            services.db.set_user_data("monthly_challenge", 2)
+            return {"ok": True, "removed": removed}
+        except Exception as e:
+            return {"ok": False, "message": str(e)}
 
     def get_inventory_data(self):
         sm = self.shop_manager
