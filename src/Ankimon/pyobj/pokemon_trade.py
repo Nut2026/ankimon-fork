@@ -796,11 +796,17 @@ def check_and_award_monthly_pokemon(logger):
         # Edge case: Pokémon exists in collection but database tracking values are missing or stale
         pokemon_in_collection = db.get_pokemon(challenge_individual_id) is not None
         
-        if pokemon_in_collection and (last_challenge_id is None or monthly_status == 0):
-            db.set_user_data("monthly_challenge_id", challenge_individual_id)
-            db.set_user_data("monthly_challenge", 1)
-            logger.log("info", f"Reconciled monthly challenge tracking: Pokémon {challenge_pokemon_data.get('name')} exists in collection, set monthly_challenge_id={challenge_individual_id}, monthly_challenge=1")
-            return
+        if pokemon_in_collection:
+            needs_reconciliation = (
+                last_challenge_id is None or 
+                str(last_challenge_id) != str(challenge_individual_id) or
+                monthly_status == 0
+            )
+            if needs_reconciliation:
+                db.set_user_data("monthly_challenge_id", challenge_individual_id)
+                db.set_user_data("monthly_challenge", 1)
+                logger.log("info", f"Reconciled monthly challenge tracking: Pokémon {challenge_pokemon_data.get('name')} exists in collection, set monthly_challenge_id={challenge_individual_id}, monthly_challenge=1")
+                return
 
         if last_challenge_id is None or str(last_challenge_id) != str(challenge_individual_id):
             db.set_user_data("monthly_challenge_id", challenge_individual_id)
