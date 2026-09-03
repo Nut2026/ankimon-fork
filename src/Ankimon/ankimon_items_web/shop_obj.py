@@ -17,7 +17,7 @@ from datetime import datetime
 from aqt import QDialog, QVBoxLayout, QWebEngineView, QWebEnginePage, mw
 from aqt.qt import Qt, QUrl, QFrame, QWebEngineProfile
 from PyQt6.QtCore import QObject, pyqtSlot, QTimer, QByteArray
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QIcon
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWidgets import QStackedWidget
 import csv
