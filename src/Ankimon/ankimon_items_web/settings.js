@@ -600,11 +600,23 @@
                     }
                     setEdit(setting.key, nextValue);
                 }
-                renderAll();  // refresh control + dirty pip
+                updateToggleButtons(wrap, setting.key);
+                updateDirtyUI();
+                markRowDirty(setting.key);
             });
             wrap.appendChild(btn);
         });
         return wrap;
+    }
+
+    function updateToggleButtons(wrap, key) {
+        const value = getSettingValue(key);
+        const btns = wrap.querySelectorAll('.setting-toggle-option');
+        btns.forEach((btn, idx) => {
+            const isOn = (idx === 0 && value) || (idx === 1 && !value);
+            btn.classList.toggle('active', isOn);
+            btn.classList.toggle('off', idx === 1);
+        });
     }
 
     function syncHudTogglesForSpriteVisibility() {
@@ -636,7 +648,8 @@
         sel.addEventListener('change', () => {
             const raw = sel.value === '__null__' ? null : sel.value;
             setEdit(setting.key, raw);
-            renderAll();
+            updateDirtyUI();
+            markRowDirty(setting.key);
         });
         return sel;
     }
