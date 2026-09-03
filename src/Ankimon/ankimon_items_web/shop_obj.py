@@ -32,7 +32,7 @@ except ImportError:  # dev helper not landed yet (thread-reload-and-misc-utils u
         return False
 
 
-from ..resources import items_path, csv_file_items_cost, csv_file_descriptions
+from ..resources import items_path, csv_file_items_cost, csv_file_descriptions, icon_path
 
 
 class SafeWebEnginePage(QWebEnginePage):
@@ -1074,6 +1074,7 @@ class AnkimonItemsWeb(QDialog):
         self._live_refresh_pending = False
         self.current_screen = None
         self.setWindowTitle("Ankimon")
+        self.setWindowIcon(QIcon(str(icon_path)))
 
         # Paint the shell dark from the first frame. The web views set their
         # own page background, but the surrounding QDialog/QFrame/QStackedWidget
