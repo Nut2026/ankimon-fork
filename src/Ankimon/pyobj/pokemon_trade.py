@@ -112,6 +112,7 @@ def show_monthly_challenge_dialog(challenge_pokemon, description, parent_window=
         - The "Accept Pokémon" button is set as the default button (Enter key)
     """
 
+    # Detect test environment - automatically accept in tests
     if "PYTEST_CURRENT_TEST" in os.environ:
         return True
 
@@ -750,116 +751,125 @@ def check_and_award_monthly_pokemon(logger):
           interrupting the user's Anki session
     """
 
-    try:
-        db = services.db
-        if db.get_user_data("rate_this") not in (True, "true"):
-            logger.log("info", "Monthly Pokemon check skipped: user has not rated the addon.")
-            return
+    # Defer the dialog to the next event loop iteration to avoid blocking profile_did_open
+    from aqt.qt import QTimer
 
-        logger.log("info", "Checking for monthly challenge Pokemon award.")
-        now = datetime.now()
-        month_names = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
-        current_month_str = f"{month_names[now.month - 1]} {now.year}"
-        monthly_data_url = "https://raw.githubusercontent.com/h0tp-ftw/ankimon/refs/heads/main/assets/challenges/monthly_challenges.json"
-        
+    def _do_check():
         try:
-            response = requests.get(monthly_data_url, timeout=2)
-            response.raise_for_status()
-            monthly_challenges = response.json()
-        except requests.exceptions.RequestException as e:
-            logger.log("error", f"Could not fetch monthly challenges; likely no internet connection. Details: {e}")
-            return  # Exit gracefully if fetching fails
-
-        current_challenge = next((c for c in monthly_challenges if c.get("month") == current_month_str), None)
-
-        if not current_challenge:
-            logger.log("info", f"No monthly challenge found for {current_month_str}.")
-            return
-
-        challenge_pokemon_data = current_challenge.get("pokemon")
-        if not challenge_pokemon_data:
-            logger.log("warning", f"Monthly challenge for {current_month_str} is missing 'pokemon' data.")
-            return
-
-        challenge_individual_id = challenge_pokemon_data.get("individual_id")
-        if not challenge_individual_id:
-            logger.log("warning", f"Monthly challenge for {current_month_str} is missing 'individual_id' in 'pokemon' data.")
-            return
-
-        last_challenge_id = db.get_user_data("monthly_challenge_id")
-        monthly_status = db.get_user_data("monthly_challenge", 0)
-        try:
-            monthly_status = int(monthly_status)
-        except (TypeError, ValueError):
-            monthly_status = 0
-
-        # Edge case: Pokémon exists in collection but database tracking values are missing or stale
-        pokemon_in_collection = db.get_pokemon(challenge_individual_id) is not None
-        
-        if pokemon_in_collection:
-            needs_reconciliation = (
-                last_challenge_id is None or 
-                str(last_challenge_id) != str(challenge_individual_id) or
-                monthly_status == 0
-            )
-            if needs_reconciliation:
-                db.set_user_data("monthly_challenge_id", challenge_individual_id)
-                db.set_user_data("monthly_challenge", 1)
-                logger.log("info", f"Reconciled monthly challenge tracking: Pokémon {challenge_pokemon_data.get('name')} exists in collection, set monthly_challenge_id={challenge_individual_id}, monthly_challenge=1")
+            db = services.db
+            if db.get_user_data("rate_this") not in (True, "true"):
+                logger.log("info", "Monthly Pokemon check skipped: user has not rated the addon.")
                 return
 
-        if last_challenge_id is None or str(last_challenge_id) != str(challenge_individual_id):
-            db.set_user_data("monthly_challenge_id", challenge_individual_id)
-            db.set_user_data("monthly_challenge", 0)
-            monthly_status = 0
+            logger.log("info", "Checking for monthly challenge Pokemon award.")
+            now = datetime.now()
+            month_names = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+            current_month_str = f"{month_names[now.month - 1]} {now.year}"
+            monthly_data_url = "https://raw.githubusercontent.com/h0tp-ftw/ankimon/refs/heads/main/assets/challenges/monthly_challenges.json"
+            
+            try:
+                response = requests.get(monthly_data_url, timeout=2)
+                response.raise_for_status()
+                monthly_challenges = response.json()
+            except requests.exceptions.RequestException as e:
+                logger.log("error", f"Could not fetch monthly challenges; likely no internet connection. Details: {e}")
+                return  # Exit gracefully if fetching fails
 
-        if monthly_status == 2:
-            logger.log("info", f"Monthly challenge for {current_month_str} was rejected.")
-            return
+            current_challenge = next((c for c in monthly_challenges if c.get("month") == current_month_str), None)
 
-        if monthly_status == 1 and pokemon_in_collection:
-            logger.log("info", f"User already has the Pokémon for {current_month_str} (ID: {challenge_individual_id}).")
-            return
+            if not current_challenge:
+                logger.log("info", f"No monthly challenge found for {current_month_str}.")
+                return
 
-        logger.log("info", f"Awarding Pokémon for {current_month_str}: {challenge_pokemon_data.get('name')}")
-        make_shiny = False
-        prev_id = current_challenge.get("previous_challenge_individual_id")
-        threshold = current_challenge.get("defeat_threshold")
+            challenge_pokemon_data = current_challenge.get("pokemon")
+            if not challenge_pokemon_data:
+                logger.log("warning", f"Monthly challenge for {current_month_str} is missing 'pokemon' data.")
+                return
 
-        if prev_id and threshold:
-            logger.log("info", f"Checking for shiny eligibility: prev_id={prev_id}, threshold={threshold}")
-            previous_challenge_pokemon = db.get_pokemon(prev_id)
-            if previous_challenge_pokemon:
-                try:
-                    meets_threshold = int(previous_challenge_pokemon.get("pokemon_defeated", 0)) >= int(threshold)
-                except (ValueError, TypeError):
-                    meets_threshold = False
-                if meets_threshold:
-                    logger.log("info", f"Shiny criteria met for {challenge_pokemon_data.get('name')}.")
-                    make_shiny = True
-        
-        new_pokemon = create_monthly_challenge_pokemon(challenge_pokemon_data, make_shiny=make_shiny)
-        shiny_text = " (Shiny)" if new_pokemon["shiny"] else ""
-        description = current_challenge.get("description", "")
-        accepted = show_monthly_challenge_dialog(new_pokemon, description, parent_window=mw)
-        if accepted:
-            db.set_user_data("monthly_challenge", 1)
-            success = add_pokemon_to_collection(new_pokemon, parent_window=mw)
-            if success:
-                logger.log("info", f"Successfully awarded {new_pokemon['name']}{shiny_text}.")
-                show_monthly_acceptance_dialog(parent_window=mw, challenge_pokemon=challenge_pokemon_data)
-            else:
+            challenge_individual_id = challenge_pokemon_data.get("individual_id")
+            if not challenge_individual_id:
+                logger.log("warning", f"Monthly challenge for {current_month_str} is missing 'individual_id' in 'pokemon' data.")
+                return
+
+            last_challenge_id = db.get_user_data("monthly_challenge_id")
+            monthly_status = db.get_user_data("monthly_challenge", 0)
+            try:
+                monthly_status = int(monthly_status)
+            except (TypeError, ValueError):
+                monthly_status = 0
+
+            # Edge case: Pokémon exists in collection but database tracking values are missing or stale
+            pokemon_in_collection = db.get_pokemon(challenge_individual_id) is not None
+            
+            # RECONCILE FIRST: If Pokémon exists in collection, sync tracking before any reset
+            if pokemon_in_collection:
+                # Check if we need to reconcile (stale/missing tracking)
+                needs_reconciliation = (
+                    last_challenge_id is None or 
+                    str(last_challenge_id) != str(challenge_individual_id) or
+                    monthly_status == 0
+                )
+                if needs_reconciliation:
+                    db.set_user_data("monthly_challenge_id", challenge_individual_id)
+                    db.set_user_data("monthly_challenge", 1)
+                    logger.log("info", f"Reconciled monthly challenge tracking: Pokémon {challenge_pokemon_data.get('name')} exists in collection, set monthly_challenge_id={challenge_individual_id}, monthly_challenge=1")
+                    return
+
+            if last_challenge_id is None or str(last_challenge_id) != str(challenge_individual_id):
+                db.set_user_data("monthly_challenge_id", challenge_individual_id)
                 db.set_user_data("monthly_challenge", 0)
-                logger.log("error", f"Failed to add {new_pokemon['name']} to collection. Status rolled back.")
-        else:
-            db.set_user_data("monthly_challenge", 2)
-            show_monthly_rejection_dialog(parent_window=mw, challenge_pokemon=challenge_pokemon_data)
-            logger.log("info", f"User rejected {new_pokemon['name']}{shiny_text}.")
+                monthly_status = 0
 
-    except Exception as e:
-        logger.log("error", f"An unexpected error occurred in check_and_award_monthly_pokemon: {e}")
-        # Still failing silently on the user's end, but with more detailed logs for debugging.
-        pass
+            if monthly_status == 2:
+                logger.log("info", f"Monthly challenge for {current_month_str} was rejected.")
+                return
+
+            if monthly_status == 1 and pokemon_in_collection:
+                logger.log("info", f"User already has the Pokémon for {current_month_str} (ID: {challenge_individual_id}).")
+                return
+
+            logger.log("info", f"Awarding Pokémon for {current_month_str}: {challenge_pokemon_data.get('name')}")
+            make_shiny = False
+            prev_id = current_challenge.get("previous_challenge_individual_id")
+            threshold = current_challenge.get("defeat_threshold")
+
+            if prev_id and threshold:
+                logger.log("info", f"Checking for shiny eligibility: prev_id={prev_id}, threshold={threshold}")
+                previous_challenge_pokemon = db.get_pokemon(prev_id)
+                if previous_challenge_pokemon:
+                    try:
+                        meets_threshold = int(previous_challenge_pokemon.get("pokemon_defeated", 0)) >= int(threshold)
+                    except (ValueError, TypeError):
+                        meets_threshold = False
+                    if meets_threshold:
+                        logger.log("info", f"Shiny criteria met for {challenge_pokemon_data.get('name')}.")
+                        make_shiny = True
+            
+            new_pokemon = create_monthly_challenge_pokemon(challenge_pokemon_data, make_shiny=make_shiny)
+            shiny_text = " (Shiny)" if new_pokemon["shiny"] else ""
+            description = current_challenge.get("description", "")
+            accepted = show_monthly_challenge_dialog(new_pokemon, description, parent_window=mw)
+            if accepted:
+                db.set_user_data("monthly_challenge", 1)
+                success = add_pokemon_to_collection(new_pokemon, parent_window=mw)
+                if success:
+                    logger.log("info", f"Successfully awarded {new_pokemon['name']}{shiny_text}.")
+                    show_monthly_acceptance_dialog(parent_window=mw, challenge_pokemon=challenge_pokemon_data)
+                else:
+                    db.set_user_data("monthly_challenge", 0)
+                    logger.log("error", f"Failed to add {new_pokemon['name']} to collection. Status rolled back.")
+            else:
+                db.set_user_data("monthly_challenge", 2)
+                show_monthly_rejection_dialog(parent_window=mw, challenge_pokemon=challenge_pokemon_data)
+                logger.log("info", f"User rejected {new_pokemon['name']}{shiny_text}.")
+
+        except Exception as e:
+            logger.log("error", f"An unexpected error occurred in check_and_award_monthly_pokemon: {e}")
+            # Still failing silently on the user's end, but with more detailed logs for debugging.
+            pass
+
+    # Defer execution to avoid blocking the profile_did_open callback
+    QTimer.singleShot(0, _do_check)
 
 def parse_to_canonical(code_str):
     if not code_str:
