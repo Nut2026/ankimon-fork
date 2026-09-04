@@ -594,6 +594,12 @@
                     state.explicitHudOverrides.clear();
                     setEdit(setting.key, nextValue);
                     syncHudTogglesForSpriteVisibility();
+                    HUD_TOGGLE_AUTO_SYNC_KEYS.forEach((key) => {
+                        const row = Array.from(document.querySelectorAll('.setting-row'))
+                            .find((candidate) => candidate.dataset.key === key);
+                        const toggle = row && row.querySelector('.setting-toggle');
+                        if (toggle) updateToggleButtons(toggle, key);
+                    });
                 } else {
                     if (HUD_TOGGLE_AUTO_SYNC_KEYS.includes(setting.key)) {
                         state.explicitHudOverrides.add(setting.key);
