@@ -711,7 +711,7 @@ def show_monthly_rejection_dialog(parent_window=None, challenge_pokemon=None):
 
     window.exec()
 
-def check_and_award_monthly_pokemon(logger):
+def check_and_award_monthly_pokemon(logger, defer=True):
     """
     Check for and award the current month's challenge Pokémon to the user.
     
@@ -869,7 +869,10 @@ def check_and_award_monthly_pokemon(logger):
             pass
 
     # Defer execution to avoid blocking the profile_did_open callback
-    QTimer.singleShot(0, _do_check)
+    if defer:
+        QTimer.singleShot(0, _do_check)
+    else:
+        _do_check()
 
 def parse_to_canonical(code_str):
     if not code_str:
