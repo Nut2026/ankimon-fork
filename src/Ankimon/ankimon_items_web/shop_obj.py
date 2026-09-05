@@ -18,6 +18,7 @@ from datetime import datetime
 import requests
 from aqt import QDialog, QVBoxLayout, QWebEngineView, QWebEnginePage, mw
 from aqt.qt import Qt, QUrl, QFrame, QWebEngineProfile
+from aqt.operations import QueryOp
 from PyQt6.QtCore import QObject, pyqtSlot, QTimer, QByteArray, QVariant
 from PyQt6.QtGui import QColor
 from PyQt6.QtWebChannel import QWebChannel
@@ -520,7 +521,6 @@ class MobileBridge(QObject):
                     estimates_loading = False
                     battle_count = estimates["encounters"]
                 else:
-                    from aqt.operations import QueryOp
 
                     QueryOp(
                         parent=self._w, op=run_sim, success=on_sim_success
@@ -850,7 +850,6 @@ class MobileBridge(QObject):
                     return res["result"]
                 return res
             else:
-                from aqt.operations import QueryOp
 
                 def run_sim(col):
                     return resolve_next(
@@ -1103,6 +1102,11 @@ class AnkimonItemsWeb(QDialog):
             SCREEN_MONTHLY: self._push_monthly_live,
         }
         self._live_refresh_pending = False
+
+        # Monthly challenge cache - prevents blocking HTTP on GUI thread
+        self._monthly_challenge_cache = None
+        self._monthly_challenge_cache_time = None
+
         self.current_screen = None
         self.setWindowTitle("Ankimon")
 
@@ -1408,9 +1412,20 @@ class AnkimonItemsWeb(QDialog):
             js = f"if (window.initializeHistory) window.initializeHistory({json.dumps(data)});"
             self.webview_history.page().runJavaScript(js)
         elif self.current_screen == SCREEN_MONTHLY:
-            data = self.get_monthly_challenge_data()
-            js = f"if (window.initializeMonthlyChallenge) window.initializeMonthlyChallenge({json.dumps(data)});"
-            self.webview_monthly.page().runJavaScript(js)
+            def push_with_data(data):
+                result_data = self.get_monthly_challenge_data(data)
+                js = f"if (window.initializeMonthlyChallenge) window.initializeMonthlyChallenge({json.dumps(result_data)});"
+                self.webview_monthly.page().runJavaScript(js)
+            
+            if self._monthly_challenge_cache:
+                push_with_data(self._monthly_challenge_cache)
+            else:
+                # Push loading state immediately
+                loading_data = {"ok": False, "loading": True, "message": "Loading monthly challenge data..."}
+                js = f"if (window.initializeMonthlyChallenge) window.initializeMonthlyChallenge({json.dumps(loading_data)});"
+                self.webview_monthly.page().runJavaScript(js)
+                # Then fetch the real data in the background
+                self._fetch_monthly_challenge_async(push_with_data)
 
     def get_profile_payload(self):
         """Profile data + a one-shot UI action ('sprite' opens the picker,
@@ -1532,12 +1547,15 @@ class AnkimonItemsWeb(QDialog):
 
     def _push_monthly_live(self):
         """Push a live refresh to the Monthly Challenge screen."""
-        data = self.get_monthly_challenge_data()
-        js = (
-            "if (window.liveRefreshMonthly) "
-            f"window.liveRefreshMonthly({json.dumps(data)});"
-        )
-        self.webview_monthly.page().runJavaScript(js)
+        def push(data):
+            result_data = self.get_monthly_challenge_data(data)
+            js = f"if (window.liveRefreshMonthly) window.liveRefreshMonthly({json.dumps(result_data)});"
+            self.webview_monthly.page().runJavaScript(js)
+        
+        if self._monthly_challenge_cache:
+            push(self._monthly_challenge_cache)
+        else:
+            self._fetch_monthly_challenge_async(push)
 
     def _get_ankidex_data(self):
         # Reuse the existing Ankidex singleton's data getter — keeps the
@@ -1669,20 +1687,68 @@ class AnkimonItemsWeb(QDialog):
         results.sort(key=lambda r: r["name"].lower())
         return {"results": results}
 
-    def _get_monthly_challenge_context(self):
-        month = datetime.now().strftime("%B %Y")
-        url = "https://raw.githubusercontent.com/h0tp-ftw/ankimon/refs/heads/main/assets/challenges/monthly_challenges.json"
-        response = requests.get(url, timeout=2)
-        response.raise_for_status()
-        challenge = next((item for item in response.json() if item.get("month") == month), None)
-        if not challenge or not challenge.get("pokemon"):
-            raise ValueError(f"No monthly challenge found for {month}")
+    def _fetch_monthly_challenge_async(self, callback=None):
+        """Fetch monthly challenge data in background thread."""
+        # If cache is fresh (within 5 minutes), use it
+        if self._monthly_challenge_cache and self._monthly_challenge_cache_time:
+            if time.time() - self._monthly_challenge_cache_time < 300:
+                if callback:
+                    callback(self._monthly_challenge_cache)
+                return
+        
+        def run_fetch(col):
+            try:
+                url = "https://raw.githubusercontent.com/h0tp-ftw/ankimon/refs/heads/main/assets/challenges/monthly_challenges.json"
+                response = requests.get(url, timeout=5)
+                response.raise_for_status()
+                data = response.json()
+                # Ensure the data is wrapped in the expected format
+                if isinstance(data, list):
+                    return {"challenges": data}
+                return data
+            except Exception as e:
+                return {"error": str(e)}
+        
+        def on_success(data):
+            if data and (not isinstance(data, dict) or "error" not in data):
+                self._monthly_challenge_cache = data
+                self._monthly_challenge_cache_time = time.time()
+            if callback:
+                callback(data)
+        
+        QueryOp(parent=self, op=run_fetch, success=on_success).without_collection().run_in_background()
 
+    def _get_monthly_challenge_context(self):
+        """Get current monthly challenge context from cache."""
+        if self._monthly_challenge_cache is None:
+            return None, None, None, 0
+        
+        # Handle both dict and list formats
+        raw_data = self._monthly_challenge_cache
+        if isinstance(raw_data, list):
+            all_challenges = raw_data
+        else:
+            all_challenges = raw_data.get("challenges", [])
+        
+        month = datetime.now().strftime("%B %Y")
+        
+        # Parse and sort by month
+        def parse_month(month_str):
+            try:
+                return datetime.strptime(month_str, "%B %Y")
+            except ValueError:
+                return datetime.min
+        all_challenges.sort(key=lambda c: parse_month(c.get("month", "")))
+        
+        challenge = next((item for item in all_challenges if item.get("month") == month), None)
+        if not challenge or not challenge.get("pokemon"):
+            return None, None, None, 0
+        
         pokemon_data = challenge["pokemon"]
         individual_id = pokemon_data.get("individual_id")
         if not individual_id:
-            raise ValueError("Monthly challenge Pokémon is missing individual_id")
-
+            return None, None, None, 0
+        
         db = services.db
         last_id = db.get_user_data("monthly_challenge_id")
         if str(last_id) != str(individual_id):
@@ -1694,20 +1760,35 @@ class AnkimonItemsWeb(QDialog):
             status = 0
         return challenge, pokemon_data, individual_id, status
 
-    def get_monthly_challenge_data(self):
-        """Fetch monthly challenge data from the live JSON file and compute results."""
+    def get_monthly_challenge_data(self, raw_data=None):
+        """Fetch monthly challenge data from the live JSON file."""
         try:
-            from ..functions.sprite_functions import get_relative_sprite_path
-            from datetime import datetime
-            import requests
-            import json
+            # If raw_data not provided, use cache
+            if raw_data is None:
+                raw_data = self._monthly_challenge_cache
+                if raw_data is None:
+                    # Return loading state instead of error
+                    return {"ok": False, "loading": True, "message": "Loading monthly challenge data..."}
             
-            # Fetch the live monthly challenges JSON
-            url = "https://raw.githubusercontent.com/h0tp-ftw/ankimon/refs/heads/main/assets/challenges/monthly_challenges.json"
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-            all_challenges = response.json()
+            if isinstance(raw_data, dict) and "error" in raw_data:
+                return {"ok": False, "message": raw_data["error"]}
             
+            # Handle both dict and list formats
+            if isinstance(raw_data, list):
+                all_challenges = raw_data
+            else:
+                all_challenges = raw_data.get("challenges", [])
+            
+            # Parse and sort challenges by month
+            def parse_month(month_str):
+                try:
+                    return datetime.strptime(month_str, "%B %Y")
+                except ValueError:
+                    return datetime.min
+            
+            # Sort by parsed month before processing
+            all_challenges.sort(key=lambda c: parse_month(c.get("month", "")))
+
             # Get current month
             current_month = datetime.now().strftime("%B %Y")
             
@@ -1967,6 +2048,30 @@ class AnkimonItemsWeb(QDialog):
                 logger.log("error", f"get_monthly_challenge_data failed: {e}\n{traceback.format_exc()}")
             return {"ok": False, "message": str(e)}
 
+    def _save_pokemon_in_transaction(self, conn, pokemon_data):
+        """Save a Pokémon using an existing transaction connection."""
+        conn.execute(
+            """INSERT OR REPLACE INTO pokemon 
+               (individual_id, id, name, level, gender, shiny, type, stats, 
+                pokemon_defeated, held_item, nickname, cp, ivs)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                pokemon_data.get('individual_id'),
+                pokemon_data.get('id'),
+                pokemon_data.get('name'),
+                pokemon_data.get('level'),
+                pokemon_data.get('gender'),
+                pokemon_data.get('shiny'),
+                json.dumps(pokemon_data.get('type', [])),
+                json.dumps(pokemon_data.get('stats', {})),
+                pokemon_data.get('pokemon_defeated', 0),
+                pokemon_data.get('held_item'),
+                pokemon_data.get('nickname'),
+                pokemon_data.get('cp'),
+                json.dumps(pokemon_data.get('ivs', {}))
+            )
+        )
+
     def _build_monthly_pokemon(self, challenge, pokemon_data):
         make_shiny = False
         previous_id = challenge.get("previous_challenge_individual_id")
@@ -1984,25 +2089,77 @@ class AnkimonItemsWeb(QDialog):
     def receive_monthly_challenge_mon(self):
         try:
             challenge, pokemon_data, individual_id, status = self._get_monthly_challenge_context()
+            if not challenge:
+                return {"ok": False, "message": "No monthly challenge available."}
+            
             db = services.db
-            if status == 1 and db.get_pokemon(individual_id) is not None:
-                return {"ok": True, "message": "Your Monthly Challenge Pokémon is already in your collection."}
-            if db.get_pokemon(individual_id) is None:
-                db.save_pokemon(self._build_monthly_pokemon(challenge, pokemon_data))
-            db.set_user_data("monthly_challenge", 1)
+            if status == 1:
+                # Check if already collected
+                existing = db.get_pokemon(individual_id)
+                if existing:
+                    return {"ok": True, "message": "Your Monthly Challenge Pokémon is already in your collection."}
+            
+            # Use a single transaction
+            with db._get_connection() as conn:
+                # Check if already collected within the transaction
+                cursor = conn.execute(
+                    "SELECT individual_id FROM pokemon WHERE individual_id = ?",
+                    (individual_id,)
+                )
+                if cursor.fetchone():
+                    return {"ok": True, "message": "Your Monthly Challenge Pokémon is already in your collection."}
+                
+                # Save Pokémon
+                pokemon = self._build_monthly_pokemon(challenge, pokemon_data)
+                self._save_pokemon_in_transaction(conn, pokemon)
+                
+                # Set status in same transaction
+                conn.execute(
+                    "INSERT OR REPLACE INTO user_data (key, value) VALUES (?, ?)",
+                    ("monthly_challenge", "1")
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO user_data (key, value) VALUES (?, ?)",
+                    ("monthly_challenge_id", individual_id)
+                )
+            
             return {"ok": True}
         except Exception as e:
+            import traceback
+            logger = services.logger
+            if logger:
+                logger.log("error", f"receive_monthly_challenge_mon failed: {e}\n{traceback.format_exc()}")
             return {"ok": False, "message": str(e)}
 
     def remove_monthly_challenge_mon(self):
         try:
             _, _, individual_id, status = self._get_monthly_challenge_context()
+            if not individual_id:
+                return {"ok": False, "message": "No monthly challenge Pokémon found."}
+            
             if status != 1:
                 return {"ok": False, "message": "The Monthly Challenge Pokémon is not currently accepted."}
-            removed = services.db.delete_pokemon(individual_id)
-            services.db.set_user_data("monthly_challenge", 2)
+            
+            db = services.db
+            with db._get_connection() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM pokemon WHERE individual_id = ?",
+                    (individual_id,)
+                )
+                removed = cursor.rowcount > 0
+                
+                # Update status in same transaction
+                conn.execute(
+                    "INSERT OR REPLACE INTO user_data (key, value) VALUES (?, ?)",
+                    ("monthly_challenge", "2")
+                )
+            
             return {"ok": True, "removed": removed}
         except Exception as e:
+            import traceback
+            logger = services.logger
+            if logger:
+                logger.log("error", f"remove_monthly_challenge_mon failed: {e}\n{traceback.format_exc()}")
             return {"ok": False, "message": str(e)}
 
     def get_inventory_data(self):
