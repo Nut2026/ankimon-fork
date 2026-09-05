@@ -1803,6 +1803,8 @@ class AnkimonItemsWeb(QDialog):
     def get_monthly_challenge_data(self, raw_data=None):
         """Fetch monthly challenge data from the live JSON file."""
         try:
+            db = services.db
+            
             # If raw_data not provided, use cache
             if raw_data is None:
                 raw_data = self._monthly_challenge_cache
