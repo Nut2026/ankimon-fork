@@ -52,18 +52,43 @@
         return ['Unknown', 'unknown'];
     }
 
+    function escapeText(text) {
+        if (!text) return '';
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
     function render(data) {
         latest = data || {};
         
+        // Check if this is a loading state
+        if (data && data.loading === true) {
+            // Show skeleton - the HTML already has it
+            const container = document.getElementById('monthly-content');
+            container.innerHTML = `
+                <div class="skeleton skeleton-hero" style="min-height: 400px; border-radius: 16px;"></div>
+            `;
+            return;
+        }
+        
         if (!latest.ok) {
             const container = document.getElementById('monthly-content');
+            const errorMessage = latest.message || 'Monthly Challenge is unavailable.';
+            // Use textContent to avoid XSS
             container.innerHTML = `
                 <div class="monthly-error">
                     <div class="monthly-error-icon">⚠️</div>
-                    <div class="monthly-error-text">${latest.message || 'Monthly Challenge is unavailable.'}</div>
+                    <div class="monthly-error-text"></div>
                 </div>
             `;
-            showToast(latest.message || 'Monthly Challenge is unavailable.', true);
+            const errorTextEl = container.querySelector('.monthly-error-text');
+            if (errorTextEl) {
+                errorTextEl.textContent = errorMessage;
+            }
+            showToast(errorMessage, true);
+            // Clear any loading state on error path
+            removeLoadingStates();
             return;
         }
 
@@ -520,7 +545,16 @@
             const removeCopy = document.getElementById('remove-copy');
             
             removeTitle.textContent = `Remove this month's Pokémon?`;
-            removeCopy.innerHTML = `This removes ${info.name}${levelText} from your collection. <strong>All progress will be reset</strong> — if you receive it again, its level and number of Pokémon defeated will return to their defaults.`;
+            // Use textContent for the display name to prevent XSS
+            const displayName = info.name || 'this Mon';
+            // Clear and rebuild with safe DOM nodes
+            removeCopy.innerHTML = '';
+            removeCopy.appendChild(document.createTextNode(`This removes ${displayName}${levelText} from your collection. `));
+            const warningSpan = document.createElement('strong');
+            warningSpan.textContent = 'All progress will be reset';
+            removeCopy.appendChild(warningSpan);
+            const suffixSpan = document.createTextNode(` — if you receive it again, its level and number of Pokémon defeated will return to their defaults.`);
+            removeCopy.appendChild(suffixSpan);
             
             document.getElementById('remove-modal').classList.remove('hidden');
             return;
@@ -530,7 +564,8 @@
         pendingAction = action;
         document.getElementById('confirm-mark').textContent = '?';
         document.getElementById('confirm-title').textContent = 'Receive this month\'s Pokémon?';
-        document.getElementById('confirm-copy').textContent = `Add ${info.name}${levelText} to your collection?`;
+        const displayName = info.name || 'this Mon';
+        document.getElementById('confirm-copy').textContent = `Add ${displayName}${levelText} to your collection?`;
         
         const confirmBtn = document.getElementById('confirm-action');
         confirmBtn.textContent = 'Accept Challenge';
@@ -559,6 +594,8 @@
 
         const callback = function(result) {
             if (result && result.ok) {
+                // Clear loading state before refresh so the button isn't stuck if the refresh fails
+                removeLoadingStates();
                 bridge.getMonthlyChallenge(render);
                 showToast('Pokémon received!');
             } else {
@@ -582,6 +619,8 @@
         closeRemoveModal();
         bridge.removeMon(function(result) {
             if (result && result.ok) {
+                // Clear loading state before refresh so the button isn't stuck if the refresh fails
+                removeLoadingStates();
                 bridge.getMonthlyChallenge(render);
                 showToast('Monthly challenge removed.');
             } else {
@@ -594,6 +633,7 @@
     function showToast(text, isError) {
         if (!text) return;
         const toast = document.getElementById('toast');
+        // Use textContent to prevent XSS
         toast.textContent = text;
         toast.classList.toggle('error', !!isError);
         toast.classList.add('visible');
