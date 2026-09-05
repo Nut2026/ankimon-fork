@@ -1018,7 +1018,8 @@ body {
     }
     .sidebar-header h1,
     .nav-trigger h1,
-    .nav-trigger .app-logo,
+    .sidebar-header h1,
+    .nav-trigger h1,
     .nav-chevron,
     .sidebar-nav .nav-group label,
     .sidebar-nav .nav-item span:not(.nav-icon),
