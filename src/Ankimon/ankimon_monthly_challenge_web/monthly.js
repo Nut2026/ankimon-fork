@@ -28,7 +28,12 @@
     };
 
     function getTypeColor(type) {
-        return TYPE_COLORS[type.toLowerCase()] || '#888888';
+        // Coerce type to string and handle various input types safely
+        if (type === null || type === undefined) {
+            return '#888888';
+        }
+        const typeStr = String(type).toLowerCase();
+        return TYPE_COLORS[typeStr] || '#888888';
     }
 
     function initChannel(callback) {
@@ -64,7 +69,7 @@
         
         // Check if this is a loading state
         if (data && data.loading === true) {
-            // Show skeleton - the HTML already has it
+            // Show skeleton - the HTML already has it, but we need to make sure it's visible
             const container = document.getElementById('monthly-content');
             container.innerHTML = `
                 <div class="skeleton skeleton-hero" style="min-height: 400px; border-radius: 16px;"></div>
@@ -128,18 +133,30 @@
             // Check if the Pokémon is in the user's collection
             const inCollection = data.in_collection || false;
             
-            // Get types
-            let types = data.type || ['Normal'];
+            // Get types - safely handle non-string, non-array values
+            let types = ['Normal'];
             if (inCollection && data.collection_types) {
-                types = data.collection_types;
+                if (Array.isArray(data.collection_types)) {
+                    types = data.collection_types;
+                } else if (typeof data.collection_types === 'string') {
+                    types = [data.collection_types];
+                }
+            } else if (data.type) {
+                if (Array.isArray(data.type)) {
+                    types = data.type;
+                } else if (typeof data.type === 'string') {
+                    types = [data.type];
+                }
             }
             
             // Update type badge
             if (typeBadge) {
-                if (inCollection && data.collection_types) {
+                if (types && types.length > 0) {
                     const typeStr = types.join('/');
                     typeBadge.textContent = typeStr;
-                    const color = getTypeColor(types[0] || 'Normal');
+                    // Safely get color - coerce first type to string
+                    const firstType = types[0];
+                    const color = getTypeColor(firstType);
                     typeBadge.style.backgroundColor = color;
                     typeBadge.style.color = '#ffffff';
                 } else {
