@@ -594,12 +594,7 @@
                     state.explicitHudOverrides.clear();
                     setEdit(setting.key, nextValue);
                     syncHudTogglesForSpriteVisibility();
-                    HUD_TOGGLE_AUTO_SYNC_KEYS.forEach((key) => {
-                        const row = Array.from(document.querySelectorAll('.setting-row'))
-                            .find((candidate) => candidate.dataset.key === key);
-                        const toggle = row && row.querySelector('.setting-toggle');
-                        if (toggle) updateToggleButtons(toggle, key);
-                    });
+                    HUD_TOGGLE_AUTO_SYNC_KEYS.forEach(refreshBooleanControl);
                 } else {
                     if (HUD_TOGGLE_AUTO_SYNC_KEYS.includes(setting.key)) {
                         state.explicitHudOverrides.add(setting.key);
@@ -613,6 +608,22 @@
             wrap.appendChild(btn);
         });
         return wrap;
+    }
+
+    /**
+     * Repaints whichever control currently renders `key` after its value was
+     * changed programmatically. Every HUD element ships as a `.setting-chip`
+     * inside one shared chip row rather than as its own boolean row, so a
+     * `.setting-row`-only lookup would silently refresh nothing; the toggle
+     * branch keeps working if a key is ever promoted to a row of its own.
+     */
+    function refreshBooleanControl(key) {
+        const value = !!getSettingValue(key);
+        const selector = cssEscape(key);
+        document.querySelectorAll(`.setting-chip[data-key="${selector}"]`)
+            .forEach((chip) => chip.classList.toggle('active', value));
+        document.querySelectorAll(`.setting-row[data-key="${selector}"] .setting-toggle`)
+            .forEach((toggle) => updateToggleButtons(toggle, key));
     }
 
     function updateToggleButtons(wrap, key) {
