@@ -80,18 +80,18 @@ def test_rate_this_check(show_info_mock, add_pokemon_mock, datetime_mock, mock_r
 
     # Test case 1: user hasn't rated (returns None)
     mock_db.get_user_data.return_value = None
-    check_and_award_monthly_pokemon(logger)
+    check_and_award_monthly_pokemon(logger, defer=False)
     mock_requests.assert_not_called()
 
     # Test case 2: user hasn't rated (returns False)
     mock_db.get_user_data.return_value = False
-    check_and_award_monthly_pokemon(logger)
+    check_and_award_monthly_pokemon(logger, defer=False)
     mock_requests.assert_not_called()
 
     # Test case 3: user rated using old 'true' string
     mock_db.get_user_data.return_value = "true"
     mock_db.get_pokemon.return_value = None # Pokémon not found yet
-    check_and_award_monthly_pokemon(logger)
+    check_and_award_monthly_pokemon(logger, defer=False)
     mock_requests.assert_called_once()
     add_pokemon_mock.assert_called_once()
 
@@ -100,7 +100,7 @@ def test_rate_this_check(show_info_mock, add_pokemon_mock, datetime_mock, mock_r
 
     # Test case 4: user rated using new boolean True
     mock_db.get_user_data.return_value = True
-    check_and_award_monthly_pokemon(logger)
+    check_and_award_monthly_pokemon(logger, defer=False)
     mock_requests.assert_called_once()
     add_pokemon_mock.assert_called_once()
 
@@ -145,7 +145,7 @@ def test_previous_challenge_pokemon_null_check(show_info_mock, add_pokemon_mock,
     mock_db.get_pokemon.side_effect = get_pokemon_side_effect
 
     # Call the function - it shouldn't crash
-    check_and_award_monthly_pokemon(logger)
+    check_and_award_monthly_pokemon(logger, defer=False)
 
     # Should have added the new pokemon (not shiny)
     add_pokemon_mock.assert_called_once()
@@ -190,7 +190,7 @@ def test_previous_challenge_pokemon_has_enough_defeats(show_info_mock, add_pokem
 
     mock_db.get_pokemon.side_effect = get_pokemon_side_effect
 
-    check_and_award_monthly_pokemon(logger)
+    check_and_award_monthly_pokemon(logger, defer=False)
 
     add_pokemon_mock.assert_called_once()
     added_pokemon = add_pokemon_mock.call_args[0][0]
