@@ -1124,6 +1124,9 @@ class AnkimonItemsWeb(QDialog):
         # Monthly challenge cache - prevents blocking HTTP on GUI thread
         self._monthly_challenge_cache = None
         self._monthly_challenge_cache_time = None
+        self._monthly_fetch_pending = False
+        self._monthly_fetch_failure_time = None
+        self._monthly_fetch_callbacks = []
 
         self.current_screen = None
         self.setWindowTitle("Ankimon")
@@ -1705,13 +1708,30 @@ class AnkimonItemsWeb(QDialog):
                     callback(self._monthly_challenge_cache)
                 return
         
+        # If a fetch is already in progress, queue the callback
+        if self._monthly_fetch_pending:
+            if callback:
+                self._monthly_fetch_callbacks.append(callback)
+            return
+        
+        # If we failed recently (within 60 seconds), wait before retrying
+        if self._monthly_fetch_failure_time:
+            if time.time() - self._monthly_fetch_failure_time < 60:
+                if callback:
+                    if self._monthly_challenge_cache:
+                        callback(self._monthly_challenge_cache)
+                    else:
+                        callback({"ok": False, "loading": True, "message": "Loading monthly challenge data..."})
+                return
+        
+        self._monthly_fetch_pending = True
+        
         def run_fetch(col):
             try:
                 url = "https://raw.githubusercontent.com/h0tp-ftw/ankimon/refs/heads/main/assets/challenges/monthly_challenges.json"
                 response = requests.get(url, timeout=5)
                 response.raise_for_status()
                 data = response.json()
-                # Ensure the data is wrapped in the expected format
                 if isinstance(data, list):
                     return {"challenges": data}
                 return data
@@ -1719,11 +1739,22 @@ class AnkimonItemsWeb(QDialog):
                 return {"error": str(e)}
         
         def on_success(data):
+            self._monthly_fetch_pending = False
             if data and (not isinstance(data, dict) or "error" not in data):
                 self._monthly_challenge_cache = data
                 self._monthly_challenge_cache_time = time.time()
+                self._monthly_fetch_failure_time = None
+            else:
+                self._monthly_fetch_failure_time = time.time()
+            
+            # Call all pending callbacks
+            callbacks = self._monthly_fetch_callbacks[:]
+            self._monthly_fetch_callbacks = []
             if callback:
-                callback(data)
+                callbacks.append(callback)
+            for cb in callbacks:
+                if cb:
+                    cb(data)
         
         QueryOp(parent=self, op=run_fetch, success=on_success).without_collection().run_in_background()
 
@@ -1801,24 +1832,14 @@ class AnkimonItemsWeb(QDialog):
             # Get current month
             current_month = datetime.now().strftime("%B %Y")
             
-            # Get current challenge status from DB
-            db = services.db
-            current_individual_id = None
-            current_status = 0
+            # Use _get_monthly_challenge_context() to get current status - avoids duplicating DB writes
+            _, _, current_individual_id, current_status = self._get_monthly_challenge_context()
             
-            # Find the current month's challenge
-            current_challenge = next((c for c in all_challenges if c.get("month") == current_month), None)
-            if current_challenge and current_challenge.get("pokemon"):
-                current_individual_id = current_challenge["pokemon"].get("individual_id")
-                if current_individual_id:
-                    last_id = db.get_user_data("monthly_challenge_id")
-                    if str(last_id) != str(current_individual_id):
-                        db.set_user_data("monthly_challenge_id", current_individual_id)
-                        db.set_user_data("monthly_challenge", 0)
-                    try:
-                        current_status = int(db.get_user_data("monthly_challenge", 0))
-                    except (TypeError, ValueError):
-                        current_status = 0
+            # If context returned None for individual_id, try to find it from challenges
+            if current_individual_id is None:
+                current_challenge = next((c for c in all_challenges if c.get("month") == current_month), None)
+                if current_challenge and current_challenge.get("pokemon"):
+                    current_individual_id = current_challenge["pokemon"].get("individual_id")
             
             # Get sprite visibility setting
             show_sprites = True
@@ -1851,20 +1872,14 @@ class AnkimonItemsWeb(QDialog):
                     if next_id:
                         needed_ids.append(next_id)
             
-            # Fetch only needed Pokémon in one query
+            # Fetch only needed Pokémon using the existing API
             all_pokemon_in_collection = {}
             if needed_ids:
                 try:
-                    # Use a targeted query with IN clause
-                    placeholders = ','.join(['?'] * len(needed_ids))
-                    query = f"SELECT * FROM pokemon WHERE individual_id IN ({placeholders})"
-                    cursor = db.execute(query, needed_ids)
-                    for row in cursor.fetchall():
-                        # Convert row to dict based on column names
-                        row_dict = dict(row)
-                        ind_id = row_dict.get("individual_id")
-                        if ind_id:
-                            all_pokemon_in_collection[ind_id] = row_dict
+                    for ind_id in needed_ids:
+                        pokemon_data = db.get_pokemon(ind_id)
+                        if pokemon_data:
+                            all_pokemon_in_collection[ind_id] = pokemon_data
                 except Exception as e:
                     logger = services.logger
                     if logger:
@@ -2001,26 +2016,16 @@ class AnkimonItemsWeb(QDialog):
                     next_pokemon_in_db = all_pokemon_in_collection.get(next_individual_id) if next_individual_id else None
                     
                     if is_collected and next_pokemon_in_db is None:
-                        # Month A's ID is present, Month B's ID is NOT present → Pending: Accepted
                         entry["result"] = "pending_accepted"
-                        if logger:
-                            logger.log("debug", f"[Monthly] {month}: → Pending: Accepted")
                     elif not is_collected and next_pokemon_in_db is None:
-                        # Month A's ID is NOT present, Month B's ID is NOT present → Pending: Rejected
                         entry["result"] = "pending_rejected"
-                        if logger:
-                            logger.log("debug", f"[Monthly] {month}: → Pending: Rejected")
                     elif not is_collected:
-                        # ID not in collection → Rejected
                         entry["result"] = "rejected"
-                        if logger:
-                            logger.log("debug", f"[Monthly] {month}: NOT in collection → Rejected")
                     else:
                         # ID IS in collection → Check if next month's Pokémon is shiny
                         next_is_shiny = False
                         if next_pokemon_in_db:
                             raw_shiny = next_pokemon_in_db.get("shiny", False)
-                            # Handle both boolean and integer storage
                             if isinstance(raw_shiny, bool):
                                 next_is_shiny = raw_shiny
                             elif isinstance(raw_shiny, int):
@@ -2030,36 +2035,21 @@ class AnkimonItemsWeb(QDialog):
                             else:
                                 next_is_shiny = bool(raw_shiny)
                         
-                        # CRITICAL: Log everything for debugging
-                        if logger:
-                            next_month_name = next_challenge.get("month", "None") if next_challenge else "None"
-                            logger.log("debug", f"[Monthly] ===== CHECKING {month} =====")
-                            logger.log("debug", f"[Monthly] current_month_in_db: {is_collected}")
-                            logger.log("debug", f"[Monthly] next_month: {next_month_name}")
-                            logger.log("debug", f"[Monthly] next_individual_id: {next_individual_id}")
-                            logger.log("debug", f"[Monthly] next_pokemon_in_db: {next_pokemon_in_db is not None}")
-                            if next_pokemon_in_db:
-                                logger.log("debug", f"[Monthly] next_pokemon shiny raw value: {next_pokemon_in_db.get('shiny', 'NOT FOUND')}")
-                                logger.log("debug", f"[Monthly] next_pokemon name: {next_pokemon_in_db.get('name', 'UNKNOWN')}")
-                            logger.log("debug", f"[Monthly] next_is_shiny: {next_is_shiny}")
-                        
                         if next_pokemon_in_db and next_is_shiny:
-                            # Current month's ID is in collection AND next month's Mon is in collection AND shiny → Succeeded!
                             entry["result"] = "success"
-                            if logger:
-                                logger.log("debug", f"[Monthly] {month}: → SUCCEEDED!")
                         elif next_pokemon_in_db and not next_is_shiny:
-                            # Current month's ID is in collection AND next month's Mon is in collection BUT NOT shiny → Next time's a charm!
                             entry["result"] = "next_time"
-                            if logger:
-                                logger.log("debug", f"[Monthly] {month}: → NEXT TIME'S A CHARM!")
                         else:
-                            # Current month's ID is in collection but next month's Mon is not collected → Accepted
                             entry["result"] = "accepted"
-                            if logger:
-                                logger.log("debug", f"[Monthly] {month}: → Accepted")
                 
                 challenges_list.append(entry)
+            
+            # Single summary log per render instead of per-challenge debug logging
+            if logger:
+                logger.log("debug", f"[Monthly] Rendered {len(challenges_list)} challenges, "
+                                    f"current_month={current_month}, "
+                                    f"current_status={current_status}, "
+                                    f"loaded_collection_entries={len(all_pokemon_in_collection)}")
             
             return {
                 "ok": True,
@@ -2081,15 +2071,17 @@ class AnkimonItemsWeb(QDialog):
 
     def _save_pokemon_in_transaction(self, conn, pokemon_data):
         """Save a Pokémon using an existing transaction connection."""
+        # Normalize name: lowercase and strip hyphens
+        name = pokemon_data.get('name', '').lower().replace('-', '')
         conn.execute(
-            """INSERT OR REPLACE INTO pokemon 
+            """INSERT OR REPLACE INTO captured_pokemon 
                (individual_id, id, name, level, gender, shiny, type, stats, 
                 pokemon_defeated, held_item, nickname, cp, ivs)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 pokemon_data.get('individual_id'),
                 pokemon_data.get('id'),
-                pokemon_data.get('name'),
+                name,
                 pokemon_data.get('level'),
                 pokemon_data.get('gender'),
                 pokemon_data.get('shiny'),
@@ -2099,7 +2091,6 @@ class AnkimonItemsWeb(QDialog):
                 pokemon_data.get('held_item'),
                 pokemon_data.get('nickname'),
                 pokemon_data.get('cp'),
-                # Fix: Use 'iv' field, not 'ivs' - create_monthly_challenge_pokemon returns "iv"
                 json.dumps(pokemon_data.get('iv', {}))
             )
         )
@@ -2135,7 +2126,7 @@ class AnkimonItemsWeb(QDialog):
             with db._get_connection() as conn:
                 # Check if already collected within the transaction
                 cursor = conn.execute(
-                    "SELECT individual_id FROM pokemon WHERE individual_id = ?",
+                    "SELECT individual_id FROM captured_pokemon WHERE individual_id = ?",
                     (individual_id,)
                 )
                 if cursor.fetchone():
@@ -2174,11 +2165,26 @@ class AnkimonItemsWeb(QDialog):
             
             db = services.db
             with db._get_connection() as conn:
+                # Use the correct table name and clean up team slots
                 cursor = conn.execute(
-                    "DELETE FROM pokemon WHERE individual_id = ?",
+                    "DELETE FROM captured_pokemon WHERE individual_id = ?",
                     (individual_id,)
                 )
                 removed = cursor.rowcount > 0
+                
+                # Also clean up team references
+                conn.execute(
+                    "UPDATE team SET individual_id = NULL WHERE individual_id = ?",
+                    (individual_id,)
+                )
+                conn.execute(
+                    "UPDATE user_data SET value = NULL WHERE key = 'companion_id' AND value = ?",
+                    (individual_id,)
+                )
+                conn.execute(
+                    "UPDATE user_data SET value = NULL WHERE key = 'xp_share_id' AND value = ?",
+                    (individual_id,)
+                )
                 
                 # Update status in same transaction
                 conn.execute(
