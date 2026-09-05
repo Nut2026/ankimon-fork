@@ -263,43 +263,73 @@
             'spe': 'Spe'
         };
 
-        const values = statKeys.map(key => stats[key] || 0);
+        // Coerce all values to safe numbers to prevent XSS
+        const values = statKeys.map(key => {
+            const val = stats[key];
+            return typeof val === 'number' && !isNaN(val) ? val : 0;
+        });
         const maxVal = Math.max(...values, 1);
 
-        let html = '';
+        // Clear container
+        container.innerHTML = '';
 
-        statKeys.forEach(key => {
-            const val = stats[key] || 0;
+        statKeys.forEach((key, index) => {
+            const val = values[index];
             const pct = Math.max(0, Math.min(100, (val / maxVal) * 100));
-            html += `
-                <div class="stats-row">
-                    <span class="stats-label">${statLabels[key]}</span>
-                    <div class="stats-bar-bg">
-                        <div class="stats-bar-fill" style="width: ${pct}%;"></div>
-                    </div>
-                    <span class="stats-value">${val}</span>
-                </div>
-            `;
+            
+            const row = document.createElement('div');
+            row.className = 'stats-row';
+            
+            const label = document.createElement('span');
+            label.className = 'stats-label';
+            label.textContent = statLabels[key];
+            row.appendChild(label);
+            
+            const barBg = document.createElement('div');
+            barBg.className = 'stats-bar-bg';
+            
+            const barFill = document.createElement('div');
+            barFill.className = 'stats-bar-fill';
+            barFill.style.width = pct + '%';
+            barBg.appendChild(barFill);
+            row.appendChild(barBg);
+            
+            const valueSpan = document.createElement('span');
+            valueSpan.className = 'stats-value';
+            valueSpan.textContent = val;
+            row.appendChild(valueSpan);
+            
+            container.appendChild(row);
         });
-
-        container.innerHTML = html;
     }
 
     function buildChallengeList(challenges) {
         const wrapper = document.createElement('div');
         wrapper.className = 'monthly-list';
 
-        // Filter out challenges from months AFTER the current month
-        const currentDate = new Date(currentMonth + ' 1, 2000');
+        // Parse current month properly
+        const currentDate = new Date(currentMonth);
+        // If currentMonth is "September 2026", this will parse correctly
+        
         const filteredChallenges = challenges.filter(c => {
-            const challengeDate = new Date(c.month + ' 1, 2000');
+            const challengeDate = new Date(c.month);
+            // If c.month is like "September 2026", this works
+            // Fallback: if invalid, check string comparison
+            if (isNaN(challengeDate.getTime())) {
+                // Fallback: compare month strings alphabetically
+                return c.month <= currentMonth;
+            }
             return challengeDate <= currentDate;
         });
 
         // Sort by month (newest first - reverse chronological)
         const sortedChallenges = [...filteredChallenges].sort((a, b) => {
-            const dateA = new Date(a.month + ' 1, 2000');
-            const dateB = new Date(b.month + ' 1, 2000');
+            const dateA = new Date(a.month);
+            const dateB = new Date(b.month);
+            // If either date is invalid, fall back to string comparison
+            if (isNaN(dateA.getTime()) || isNaN(dateB.getTime())) {
+                return a.month.localeCompare(b.month);
+            }
             return dateB - dateA;
         });
 
