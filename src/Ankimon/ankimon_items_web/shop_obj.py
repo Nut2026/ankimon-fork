@@ -18,7 +18,25 @@ from datetime import datetime
 import requests
 from aqt import QDialog, QVBoxLayout, QWebEngineView, QWebEnginePage, mw
 from aqt.qt import Qt, QUrl, QFrame, QWebEngineProfile
-from aqt.operations import QueryOp
+try:
+    from aqt.operations import QueryOp
+except ImportError:
+    # Test environment - use a stub
+    class QueryOp:
+        def __init__(self, parent=None, op=None, success=None):
+            self.parent = parent
+            self.op = op
+            self.success = success
+        
+        def without_collection(self):
+            return self
+        
+        def run_in_background(self):
+            if self.op:
+                result = self.op(None)
+                if self.success:
+                    self.success(result)
+            return self
 from PyQt6.QtCore import QObject, pyqtSlot, QTimer, QByteArray, QVariant
 from PyQt6.QtGui import QColor
 from PyQt6.QtWebChannel import QWebChannel
