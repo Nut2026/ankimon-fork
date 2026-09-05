@@ -1435,15 +1435,8 @@ class AnkimonItemsWeb(QDialog):
                 js = f"if (window.initializeMonthlyChallenge) window.initializeMonthlyChallenge({json.dumps(result_data)});"
                 self.webview_monthly.page().runJavaScript(js)
             
-            if self._monthly_challenge_cache:
-                push_with_data(self._monthly_challenge_cache)
-            else:
-                # Push loading state immediately
-                loading_data = {"ok": False, "loading": True, "message": "Loading monthly challenge data..."}
-                js = f"if (window.initializeMonthlyChallenge) window.initializeMonthlyChallenge({json.dumps(loading_data)});"
-                self.webview_monthly.page().runJavaScript(js)
-                # Then fetch the real data in the background
-                self._fetch_monthly_challenge_async(push_with_data)
+            # Always call _fetch_monthly_challenge_async - it handles cache internally
+            self._fetch_monthly_challenge_async(push_with_data)
 
     def get_profile_payload(self):
         """Profile data + a one-shot UI action ('sprite' opens the picker,
@@ -1570,10 +1563,8 @@ class AnkimonItemsWeb(QDialog):
             js = f"if (window.liveRefreshMonthly) window.liveRefreshMonthly({json.dumps(result_data)});"
             self.webview_monthly.page().runJavaScript(js)
         
-        if self._monthly_challenge_cache:
-            push(self._monthly_challenge_cache)
-        else:
-            self._fetch_monthly_challenge_async(push)
+        # Always call _fetch_monthly_challenge_async - it handles cache internally
+        self._fetch_monthly_challenge_async(push)
 
     def _get_ankidex_data(self):
         # Reuse the existing Ankidex singleton's data getter — keeps the
@@ -1843,18 +1834,41 @@ class AnkimonItemsWeb(QDialog):
             if current_individual_id:
                 collection_pokemon = db.get_pokemon(current_individual_id)
             
-            # Pre-fetch all Pokémon in the user's collection by individual_id for quick lookup
+            # Fetch only the Pokémon we need for the challenge list - avoid loading full collection
+            # Collect all individual_ids we need to check
+            needed_ids = []
+            for c in all_challenges:
+                pokemon = c.get("pokemon", {})
+                individual_id = pokemon.get("individual_id")
+                if individual_id:
+                    needed_ids.append(individual_id)
+            
+            # Also add next month's IDs for the result logic
+            for i, c in enumerate(all_challenges):
+                if i + 1 < len(all_challenges):
+                    next_pokemon = all_challenges[i + 1].get("pokemon", {})
+                    next_id = next_pokemon.get("individual_id")
+                    if next_id:
+                        needed_ids.append(next_id)
+            
+            # Fetch only needed Pokémon in one query
             all_pokemon_in_collection = {}
-            try:
-                all_pokemon = db.get_all_pokemon() or []
-                for p in all_pokemon:
-                    ind_id = p.get("individual_id")
-                    if ind_id:
-                        all_pokemon_in_collection[ind_id] = p
-            except Exception as e:
-                logger = services.logger
-                if logger:
-                    logger.log("error", f"Failed to fetch all Pokémon: {e}")
+            if needed_ids:
+                try:
+                    # Use a targeted query with IN clause
+                    placeholders = ','.join(['?'] * len(needed_ids))
+                    query = f"SELECT * FROM pokemon WHERE individual_id IN ({placeholders})"
+                    cursor = db.execute(query, needed_ids)
+                    for row in cursor.fetchall():
+                        # Convert row to dict based on column names
+                        row_dict = dict(row)
+                        ind_id = row_dict.get("individual_id")
+                        if ind_id:
+                            all_pokemon_in_collection[ind_id] = row_dict
+                except Exception as e:
+                    logger = services.logger
+                    if logger:
+                        logger.log("error", f"Failed to fetch Pokémon by IDs: {e}")
             
             # Build the challenge list
             challenges_list = []
@@ -1921,11 +1935,12 @@ class AnkimonItemsWeb(QDialog):
                 month_pokemon_in_collection = all_pokemon_in_collection.get(pokemon_id) if pokemon_id else None
                 
                 if is_current and pokemon_id:
-                    # CURRENT month - determine Status
+                    # CURRENT month - use current_status from DB
+                    entry["status"] = current_status
+                    entry["in_collection"] = (collection_pokemon is not None)
+                    
                     if collection_pokemon:
-                        # Pokémon is in collection - Status: Accepted
-                        entry["status"] = 1  # Accepted
-                        entry["in_collection"] = True
+                        # Pokémon is in collection
                         entry["collection_level"] = collection_pokemon.get("level", level)
                         entry["collection_pokedex_id"] = collection_pokemon.get("id", pokedex_id)
                         entry["collection_shiny"] = collection_pokemon.get("shiny", False)
@@ -1963,9 +1978,7 @@ class AnkimonItemsWeb(QDialog):
                         
                         entry["has_evolved"] = (evolved_id != pokedex_id)
                     else:
-                        # Pokémon not in collection - Status: Rejected
-                        entry["status"] = 2  # Rejected
-                        entry["in_collection"] = False
+                        # Pokémon not in collection
                         entry["collection_level"] = level
                         entry["collection_pokedex_id"] = pokedex_id
                         entry["collection_shiny"] = shiny_template
@@ -2086,7 +2099,8 @@ class AnkimonItemsWeb(QDialog):
                 pokemon_data.get('held_item'),
                 pokemon_data.get('nickname'),
                 pokemon_data.get('cp'),
-                json.dumps(pokemon_data.get('ivs', {}))
+                # Fix: Use 'iv' field, not 'ivs' - create_monthly_challenge_pokemon returns "iv"
+                json.dumps(pokemon_data.get('iv', {}))
             )
         )
 
