@@ -314,8 +314,56 @@ def test_monthly_challenge_reconciliation_branch(show_info_mock, dialog_mock, ad
 @patch("Ankimon.pyobj.pokemon_trade.datetime")
 @patch("Ankimon.pyobj.pokemon_trade.add_pokemon_to_collection")
 @patch("Ankimon.pyobj.pokemon_trade.show_monthly_challenge_dialog")
+@patch("Ankimon.pyobj.pokemon_trade.show_monthly_rejection_dialog")
 @patch("Ankimon.pyobj.pokemon_trade.utils.showInfo")
-def test_monthly_challenge_rollback_on_add_failure(show_info_mock, dialog_mock, add_pokemon_mock, datetime_mock, mock_requests, mock_mw, mock_db):
+def test_monthly_challenge_rejection_sets_status(show_info_mock, rejection_dialog_mock, dialog_mock, add_pokemon_mock, datetime_mock, mock_requests, mock_mw, mock_db):
+    """Test that rejecting the monthly challenge sets monthly_challenge to 2."""
+    logger = MockLogger()
+
+    dt_mock = MagicMock()
+    dt_mock.month = 1
+    dt_mock.year = 2024
+    datetime_mock.now.return_value = dt_mock
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = [
+        {
+            "month": "January 2024",
+            "pokemon": {
+                "name": "TestMon",
+                "id": 1,
+                "individual_id": "test-id"
+            }
+        }
+    ]
+    mock_requests.return_value = mock_response
+
+    mock_db.get_user_data.return_value = True
+    mock_db.get_pokemon.return_value = None
+
+    # User rejects the Pokémon
+    dialog_mock.return_value = False
+
+    check_and_award_monthly_pokemon(logger, defer=False)
+
+    # Should NOT add Pokémon
+    add_pokemon_mock.assert_not_called()
+    
+    # Should set monthly_challenge to 2 (rejected)
+    mock_db.set_user_data.assert_any_call("monthly_challenge", 2)
+    mock_db.set_user_data.assert_any_call("monthly_challenge_id", "test-id")
+    
+    # Should show the challenge dialog and rejection dialog
+    dialog_mock.assert_called_once()
+    rejection_dialog_mock.assert_called_once()
+
+
+@patch("Ankimon.pyobj.pokemon_trade.datetime")
+@patch("Ankimon.pyobj.pokemon_trade.add_pokemon_to_collection")
+@patch("Ankimon.pyobj.pokemon_trade.show_monthly_challenge_dialog")
+@patch("Ankimon.pyobj.pokemon_trade.show_monthly_acceptance_dialog")
+@patch("Ankimon.pyobj.pokemon_trade.utils.showInfo")
+def test_monthly_challenge_rollback_on_add_failure(show_info_mock, acceptance_dialog_mock, dialog_mock, add_pokemon_mock, datetime_mock, mock_requests, mock_mw, mock_db):
     """Test that monthly_challenge is rolled back to 0 when add_pokemon_to_collection fails."""
     logger = MockLogger()
 
@@ -362,48 +410,5 @@ def test_monthly_challenge_rollback_on_add_failure(show_info_mock, dialog_mock, 
     
     # Should show the challenge dialog (user accepted)
     dialog_mock.assert_called_once()
-
-
-@patch("Ankimon.pyobj.pokemon_trade.datetime")
-@patch("Ankimon.pyobj.pokemon_trade.add_pokemon_to_collection")
-@patch("Ankimon.pyobj.pokemon_trade.show_monthly_challenge_dialog")
-@patch("Ankimon.pyobj.pokemon_trade.utils.showInfo")
-def test_monthly_challenge_rejection_sets_status(show_info_mock, dialog_mock, add_pokemon_mock, datetime_mock, mock_requests, mock_mw, mock_db):
-    """Test that rejecting the monthly challenge sets monthly_challenge to 2."""
-    logger = MockLogger()
-
-    dt_mock = MagicMock()
-    dt_mock.month = 1
-    dt_mock.year = 2024
-    datetime_mock.now.return_value = dt_mock
-
-    mock_response = MagicMock()
-    mock_response.json.return_value = [
-        {
-            "month": "January 2024",
-            "pokemon": {
-                "name": "TestMon",
-                "id": 1,
-                "individual_id": "test-id"
-            }
-        }
-    ]
-    mock_requests.return_value = mock_response
-
-    mock_db.get_user_data.return_value = True
-    mock_db.get_pokemon.return_value = None
-
-    # User rejects the Pokémon
-    dialog_mock.return_value = False
-
-    check_and_award_monthly_pokemon(logger, defer=False)
-
-    # Should NOT add Pokémon
-    add_pokemon_mock.assert_not_called()
-    
-    # Should set monthly_challenge to 2 (rejected)
-    mock_db.set_user_data.assert_any_call("monthly_challenge", 2)
-    mock_db.set_user_data.assert_any_call("monthly_challenge_id", "test-id")
-    
-    # Should show the challenge dialog
-    dialog_mock.assert_called_once()
+    # Should NOT show acceptance dialog (since add failed)
+    acceptance_dialog_mock.assert_not_called()
