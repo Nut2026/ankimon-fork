@@ -17,6 +17,99 @@ from .error_handler import show_warning_with_traceback
 from ..services import services
 import os
 
+
+class MonthlyChallengeDialog(QDialog):
+    """Dialog that ignores Escape key to prevent accidental rejection."""
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            event.accept()  # Ignore Escape
+        else:
+            super().keyPressEvent(event)
+
+
+def _challenge_palette():
+    """Return the theme-specific colour palette for challenge dialogs."""
+    from aqt.theme import theme_manager
+    is_dark = theme_manager.night_mode
+    if is_dark:
+        return {
+            "bg": "#0d1117",
+            "bg_darker": "#161b22",
+            "bg_card_hover": "#252d3f",
+            "border": "#2d3748",
+            "text": "#f0f6fc",
+            "accent_blue": "#58a6ff",
+            "accent_green": "#3fb950",
+            "blue_solid": "#2474a8",
+            "btn_bg": "rgba(88, 166, 255, 0.08)",
+            "btn_hover": "rgba(88, 166, 255, 0.18)",
+            "btn_primary_bg": "#3fb950",
+            "btn_primary_hover": "#2ea043",
+            "update_btn_text": "#0d1117"
+        }
+    else:
+        return {
+            "bg": "#ffffff",
+            "bg_darker": "#f0f2f5",
+            "bg_card_hover": "#e9ecef",
+            "border": "#d0d7de",
+            "text": "#24292f",
+            "accent_blue": "#0969da",
+            "accent_green": "#2da44e",
+            "blue_solid": "#1a6fb0",
+            "btn_bg": "rgba(9, 105, 218, 0.08)",
+            "btn_hover": "rgba(9, 105, 218, 0.18)",
+            "btn_primary_bg": "#2da44e",
+            "btn_primary_hover": "#2ea043",
+            "update_btn_text": "#e6ffea"
+        }
+
+
+def _build_sprite_box(container_size, sprite_size, challenge_pokemon, show_sprites):
+    """Build a sprite box QFrame with the given dimensions and Pokémon data."""
+    from PyQt6.QtWidgets import QSizePolicy
+    from PyQt6.QtGui import QMovie
+    
+    sprite_box = QFrame()
+    sprite_box.setObjectName("spriteBox")
+    sprite_box.setFixedSize(container_size, container_size)
+    sprite_box_layout = QVBoxLayout(sprite_box)
+    sprite_box_layout.setContentsMargins(0, 0, 0, 0)
+    sprite_box_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    sprite_label = QLabel()
+    sprite_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    sprite_label.setFixedSize(sprite_size, sprite_size)
+    sprite_label.setScaledContents(False)
+    sprite_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    
+    if show_sprites and challenge_pokemon is not None:
+        pokemon_id = challenge_pokemon.get("id", 25)
+        pokemon_name = challenge_pokemon.get("name", "Pikachu")
+        shiny = challenge_pokemon.get("shiny", False)
+        gender = challenge_pokemon.get("gender", "N")
+        
+        try:
+            from ..functions.sprite_functions import get_sprite_path
+            sprite_path = get_sprite_path(
+                side="front", 
+                sprite_type="gif", 
+                id=pokemon_id, 
+                shiny=shiny, 
+                gender=gender, 
+                pokemon_name=pokemon_name
+            )
+            
+            if os.path.exists(sprite_path):
+                movie = QMovie(sprite_path)
+                sprite_label.setMovie(movie)
+                movie.start()
+        except Exception:
+            pass
+    
+    sprite_box_layout.addWidget(sprite_label)
+    return sprite_box
+
 # --- Module-level functions for Monthly Challenges ---
 
 def create_monthly_challenge_pokemon(pokemon_data, make_shiny=False):
@@ -114,10 +207,9 @@ def show_monthly_challenge_dialog(challenge_pokemon, description, parent_window=
     from PyQt6.QtWidgets import QSizePolicy
     from PyQt6.QtGui import QMovie, QPixmap
     from PyQt6.QtCore import QSize
-    from aqt.theme import theme_manager
     
     parent = parent_window if parent_window is not None else mw
-    window = QDialog(parent)
+    window = MonthlyChallengeDialog(parent)
     window.setWindowTitle("Monthly Challenge Begins!")
     window.setWindowIcon(QIcon(str(icon_path)))
     window.setWindowModality(Qt.WindowModality.ApplicationModal)
@@ -135,29 +227,17 @@ def show_monthly_challenge_dialog(challenge_pokemon, description, parent_window=
     except Exception:
         pass
 
-    is_dark = theme_manager.night_mode
-    if is_dark:
-        bg = "#0d1117"
-        bg_card_hover = "#252d3f"
-        border = "#2d3748"
-        text = "#f0f6fc"
-        accent_blue = "#63b3ed"
-        blue_solid = "#2474a8"
-        accent_green = "#3fb950"
-        btn_bg = "rgba(88, 166, 255, 0.08)"
-        btn_hover = "rgba(88, 166, 255, 0.18)"
-        update_btn_text = "#0d1117"
-    else:
-        bg = "#ffffff"
-        bg_card_hover = "#e9ecef"
-        border = "#d0d7de"
-        text = "#24292f"
-        accent_blue = "#0969da"
-        blue_solid = "#1a6fb0"
-        accent_green = "#2da44e"
-        btn_bg = "rgba(9, 105, 218, 0.08)"
-        btn_hover = "rgba(9, 105, 218, 0.18)"
-        update_btn_text = "#e6ffea"
+    palette = _challenge_palette()
+    bg = palette["bg"]
+    bg_card_hover = palette["bg_card_hover"]
+    border = palette["border"]
+    text = palette["text"]
+    accent_blue = palette["accent_blue"]
+    blue_solid = palette["blue_solid"]
+    accent_green = palette["accent_green"]
+    btn_bg = palette["btn_bg"]
+    btn_hover = palette["btn_hover"]
+    update_btn_text = palette["update_btn_text"]
 
     window.setStyleSheet(f"""
         QDialog {{
@@ -242,42 +322,7 @@ def show_monthly_challenge_dialog(challenge_pokemon, description, parent_window=
     content_layout.setSpacing(16)
     content_layout.setContentsMargins(0, 8, 0, 8)
 
-    sprite_box = QFrame()
-    sprite_box.setObjectName("spriteBox")
-    sprite_box.setFixedSize(160, 160)
-    sprite_box_layout = QVBoxLayout(sprite_box)
-    sprite_box_layout.setContentsMargins(0, 0, 0, 0)
-    sprite_box_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-    sprite_label = QLabel()
-    sprite_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    sprite_label.setFixedSize(120, 120)
-    sprite_label.setScaledContents(False)
-    sprite_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-    
-    if show_sprites:
-        pokemon_id = challenge_pokemon.get("id", 25)
-        pokemon_name = challenge_pokemon.get("name", "Pikachu")
-        shiny = challenge_pokemon.get("shiny", False)
-        gender = challenge_pokemon.get("gender", "N")
-        
-        try:
-            from ..functions.sprite_functions import get_sprite_path
-            sprite_path = get_sprite_path(
-                side="front", 
-                sprite_type="gif", 
-                id=pokemon_id, 
-                shiny=shiny, 
-                gender=gender, 
-                pokemon_name=pokemon_name
-            )
-            movie = QMovie(sprite_path)
-            sprite_label.setMovie(movie)
-            movie.start()
-        except Exception:
-            pass
-    
-    sprite_box_layout.addWidget(sprite_label)
+    sprite_box = _build_sprite_box(160, 120, challenge_pokemon, show_sprites)
     content_layout.addWidget(sprite_box, alignment=Qt.AlignmentFlag.AlignTop)
 
     desc_box = QFrame()
@@ -377,7 +422,6 @@ def show_monthly_acceptance_dialog(parent_window=None, challenge_pokemon=None):
     from PyQt6.QtWidgets import QSizePolicy
     from PyQt6.QtGui import QMovie
     from PyQt6.QtCore import QSize
-    from aqt.theme import theme_manager
     import os
     
     parent = parent_window if parent_window is not None else mw
@@ -398,33 +442,19 @@ def show_monthly_acceptance_dialog(parent_window=None, challenge_pokemon=None):
     except Exception:
         pass
 
-    is_dark = theme_manager.night_mode
-    if is_dark:
-        bg = "#0d1117"
-        bg_darker = "#161b22"
-        bg_card_hover = "#252d3f"
-        border = "#2d3748"
-        text = "#f0f6fc"
-        accent_blue = "#58a6ff"
-        accent_green = "#3fb950"
-        blue_solid = "#2474a8"
-        btn_bg = "rgba(88, 166, 255, 0.08)"
-        btn_hover = "rgba(88, 166, 255, 0.18)"
-        btn_primary_bg = "#3fb950"
-        btn_primary_hover = "#2ea043"
-    else:
-        bg = "#ffffff"
-        bg_darker = "#f0f2f5"
-        bg_card_hover = "#e9ecef"
-        border = "#d0d7de"
-        text = "#24292f"
-        accent_blue = "#0969da"
-        accent_green = "#2da44e"
-        blue_solid = "#1a6fb0"
-        btn_bg = "rgba(9, 105, 218, 0.08)"
-        btn_hover = "rgba(9, 105, 218, 0.18)"
-        btn_primary_bg = "#2da44e"
-        btn_primary_hover = "#2ea043"
+    palette = _challenge_palette()
+    bg = palette["bg"]
+    bg_darker = palette["bg_darker"]
+    bg_card_hover = palette["bg_card_hover"]
+    border = palette["border"]
+    text = palette["text"]
+    accent_blue = palette["accent_blue"]
+    accent_green = palette["accent_green"]
+    blue_solid = palette["blue_solid"]
+    btn_bg = palette["btn_bg"]
+    btn_hover = palette["btn_hover"]
+    btn_primary_bg = palette["btn_primary_bg"]
+    btn_primary_hover = palette["btn_primary_hover"]
 
     window.setStyleSheet(f"""
         QDialog {{
@@ -466,46 +496,7 @@ def show_monthly_acceptance_dialog(parent_window=None, challenge_pokemon=None):
     message_layout = QHBoxLayout()
     message_layout.setSpacing(12)
 
-    sprite_box = QFrame()
-    sprite_box.setObjectName("spriteBox")
-    sprite_box.setFixedSize(80, 80)
-    sprite_box_layout = QVBoxLayout(sprite_box)
-    sprite_box_layout.setContentsMargins(0, 0, 0, 0)
-    sprite_box_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-    sprite_label = QLabel()
-    sprite_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    sprite_label.setFixedSize(64, 64)
-    sprite_label.setScaledContents(False)
-    sprite_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-    
-    if show_sprites and challenge_pokemon is not None:
-        pokemon_id = challenge_pokemon.get("id", 25)
-        pokemon_name = challenge_pokemon.get("name", "Pikachu")
-        shiny = challenge_pokemon.get("shiny", False)
-        gender = challenge_pokemon.get("gender", "N")
-        
-        try:
-            from ..functions.sprite_functions import get_sprite_path
-            sprite_path = get_sprite_path(
-                side="front", 
-                sprite_type="gif", 
-                id=pokemon_id, 
-                shiny=shiny, 
-                gender=gender, 
-                pokemon_name=pokemon_name
-            )
-            
-            if os.path.exists(sprite_path):
-                movie = QMovie(sprite_path)
-                sprite_label.setMovie(movie)
-                movie.start()
-            else:
-                pass
-        except Exception:
-            pass
-    
-    sprite_box_layout.addWidget(sprite_label)
+    sprite_box = _build_sprite_box(80, 64, challenge_pokemon, show_sprites)
     message_layout.addWidget(sprite_box)
 
     pokemon_name = challenge_pokemon.get("name", "Pokémon") if challenge_pokemon else "Pokémon"
@@ -556,7 +547,6 @@ def show_monthly_rejection_dialog(parent_window=None, challenge_pokemon=None):
     from PyQt6.QtWidgets import QSizePolicy
     from PyQt6.QtGui import QMovie
     from PyQt6.QtCore import QSize
-    from aqt.theme import theme_manager
     import os
     
     parent = parent_window if parent_window is not None else mw
@@ -577,33 +567,19 @@ def show_monthly_rejection_dialog(parent_window=None, challenge_pokemon=None):
     except Exception:
         pass
 
-    is_dark = theme_manager.night_mode
-    if is_dark:
-        bg = "#0d1117"
-        bg_darker = "#161b22"
-        bg_card_hover = "#252d3f"
-        border = "#2d3748"
-        text = "#f0f6fc"
-        accent_blue = "#58a6ff"
-        accent_green = "#3fb950"
-        blue_solid = "#2474a8"
-        btn_bg = "rgba(88, 166, 255, 0.08)"
-        btn_hover = "rgba(88, 166, 255, 0.18)"
-        btn_primary_bg = "#3fb950"
-        btn_primary_hover = "#2ea043"
-    else:
-        bg = "#ffffff"
-        bg_darker = "#f0f2f5"
-        bg_card_hover = "#e9ecef"
-        border = "#d0d7de"
-        text = "#24292f"
-        accent_blue = "#0969da"
-        accent_green = "#2da44e"
-        blue_solid = "#1a6fb0"
-        btn_bg = "rgba(9, 105, 218, 0.08)"
-        btn_hover = "rgba(9, 105, 218, 0.18)"
-        btn_primary_bg = "#2da44e"
-        btn_primary_hover = "#2ea043"
+    palette = _challenge_palette()
+    bg = palette["bg"]
+    bg_darker = palette["bg_darker"]
+    bg_card_hover = palette["bg_card_hover"]
+    border = palette["border"]
+    text = palette["text"]
+    accent_blue = palette["accent_blue"]
+    accent_green = palette["accent_green"]
+    blue_solid = palette["blue_solid"]
+    btn_bg = palette["btn_bg"]
+    btn_hover = palette["btn_hover"]
+    btn_primary_bg = palette["btn_primary_bg"]
+    btn_primary_hover = palette["btn_primary_hover"]
 
     window.setStyleSheet(f"""
         QDialog {{
@@ -645,46 +621,7 @@ def show_monthly_rejection_dialog(parent_window=None, challenge_pokemon=None):
     message_layout = QHBoxLayout()
     message_layout.setSpacing(12)
 
-    sprite_box = QFrame()
-    sprite_box.setObjectName("spriteBox")
-    sprite_box.setFixedSize(80, 80)
-    sprite_box_layout = QVBoxLayout(sprite_box)
-    sprite_box_layout.setContentsMargins(0, 0, 0, 0)
-    sprite_box_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-    sprite_label = QLabel()
-    sprite_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    sprite_label.setFixedSize(64, 64)
-    sprite_label.setScaledContents(False)
-    sprite_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-    
-    if show_sprites and challenge_pokemon is not None:
-        pokemon_id = challenge_pokemon.get("id", 25)
-        pokemon_name = challenge_pokemon.get("name", "Pikachu")
-        shiny = challenge_pokemon.get("shiny", False)
-        gender = challenge_pokemon.get("gender", "N")
-        
-        try:
-            from ..functions.sprite_functions import get_sprite_path
-            sprite_path = get_sprite_path(
-                side="front", 
-                sprite_type="gif", 
-                id=pokemon_id, 
-                shiny=shiny, 
-                gender=gender, 
-                pokemon_name=pokemon_name
-            )
-            
-            if os.path.exists(sprite_path):
-                movie = QMovie(sprite_path)
-                sprite_label.setMovie(movie)
-                movie.start()
-            else:
-                pass
-        except Exception:
-            pass
-    
-    sprite_box_layout.addWidget(sprite_label)
+    sprite_box = _build_sprite_box(80, 64, challenge_pokemon, show_sprites)
     message_layout.addWidget(sprite_box)
 
     message = QLabel(
@@ -864,9 +801,19 @@ def check_and_award_monthly_pokemon(logger, defer=True):
             pass
 
     # Defer execution to avoid blocking the profile_did_open callback
+    # Run the blocking HTTP request in a background thread to avoid UI freeze
     if defer:
-        from aqt.qt import QTimer
-        QTimer.singleShot(0, _do_check)
+        import threading
+        
+        def run_in_background():
+            try:
+                _do_check()
+            except Exception as e:
+                logger.log("error", f"Error in background monthly check: {e}")
+        
+        # Start the background thread for the HTTP request
+        thread = threading.Thread(target=run_in_background, daemon=True)
+        thread.start()
     else:
         _do_check()
 
