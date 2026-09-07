@@ -749,17 +749,6 @@ def check_and_award_monthly_pokemon(logger, defer=True):
           interrupting the user's Anki session
     """
 
-    # Defer the dialog to the next event loop iteration to avoid blocking profile_did_open
-    def _do_check():
-        ...
-
-    if defer:
-        # Defer the dialog to the next event loop iteration to avoid blocking profile_did_open
-        from aqt.qt import QTimer
-        QTimer.singleShot(0, _do_check)
-    else:
-        _do_check()
-
     def _do_check():
         try:
             db = services.db
@@ -876,6 +865,7 @@ def check_and_award_monthly_pokemon(logger, defer=True):
 
     # Defer execution to avoid blocking the profile_did_open callback
     if defer:
+        from aqt.qt import QTimer
         QTimer.singleShot(0, _do_check)
     else:
         _do_check()
