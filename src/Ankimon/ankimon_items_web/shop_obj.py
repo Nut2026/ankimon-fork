@@ -1071,6 +1071,13 @@ class MonthlyBridge(QObject):
         self._w.push_screen_data()
         return result
 
+    @pyqtSlot(result="QVariant")
+    def rejectMon(self):
+        """Reject the current monthly challenge without claiming the Pokémon."""
+        result = self._w.reject_monthly_challenge_mon()
+        self._w.push_screen_data()
+        return result
+
 class AnkimonItemsWeb(QDialog):
     def __init__(
         self,
@@ -2073,27 +2080,20 @@ class AnkimonItemsWeb(QDialog):
 
     def _save_pokemon_in_transaction(self, conn, pokemon_data):
         """Save a Pokémon using an existing transaction connection."""
-        # Normalize name: lowercase and strip hyphens
-        name = pokemon_data.get('name', '').lower().replace('-', '')
+        # Get the individual_id from the data
+        individual_id = pokemon_data.get('individual_id')
+        if not individual_id:
+            raise ValueError("Missing individual_id in pokemon_data")
+        
+        # Serialize the entire pokemon_data as JSON in the 'data' column
+        # This matches the DatabaseManager.save_pokemon pattern
         conn.execute(
-            """INSERT OR REPLACE INTO captured_pokemon 
-               (individual_id, id, name, level, gender, shiny, type, stats, 
-                pokemon_defeated, held_item, nickname, cp, ivs)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT OR REPLACE INTO captured_pokemon (individual_id, data, is_main)
+               VALUES (?, ?, ?)""",
             (
-                pokemon_data.get('individual_id'),
-                pokemon_data.get('id'),
-                name,
-                pokemon_data.get('level'),
-                pokemon_data.get('gender'),
-                pokemon_data.get('shiny'),
-                json.dumps(pokemon_data.get('type', [])),
-                json.dumps(pokemon_data.get('stats', {})),
-                pokemon_data.get('pokemon_defeated', 0),
-                pokemon_data.get('held_item'),
-                pokemon_data.get('nickname'),
-                pokemon_data.get('cp'),
-                json.dumps(pokemon_data.get('iv', {}))
+                individual_id,
+                json.dumps(pokemon_data),
+                0  # is_main = 0 for monthly challenge Pokémon
             )
         )
 
@@ -2200,6 +2200,27 @@ class AnkimonItemsWeb(QDialog):
             logger = services.logger
             if logger:
                 logger.log("error", f"remove_monthly_challenge_mon failed: {e}\n{traceback.format_exc()}")
+            return {"ok": False, "message": str(e)}
+
+    def reject_monthly_challenge_mon(self):
+        """Reject the current monthly challenge without claiming the Pokémon."""
+        try:
+            challenge, pokemon_data, individual_id, status = self._get_monthly_challenge_context()
+            if not challenge:
+                return {"ok": False, "message": "No monthly challenge available."}
+            
+            if status != 0:
+                return {"ok": False, "message": "Can only reject a challenge that hasn't been claimed yet."}
+            
+            db = services.db
+            db.set_user_data("monthly_challenge", 2)
+            
+            return {"ok": True, "message": "Challenge rejected."}
+        except Exception as e:
+            import traceback
+            logger = services.logger
+            if logger:
+                logger.log("error", f"reject_monthly_challenge_mon failed: {e}\n{traceback.format_exc()}")
             return {"ok": False, "message": str(e)}
 
     def get_inventory_data(self):
