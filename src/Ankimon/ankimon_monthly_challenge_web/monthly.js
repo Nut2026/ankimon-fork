@@ -473,7 +473,7 @@
                     removeBtn.textContent = 'Remove';
                     removeBtn.addEventListener('click', function(e) {
                         e.stopPropagation();
-                        openConfirm('reject');
+                        openConfirm('remove');
                     });
                     actionBtns.appendChild(removeBtn);
                 } else if (challenge.status === 2) {
@@ -586,8 +586,8 @@
         const info = getPokemonDisplayInfo();
         const levelText = info.level ? ` Lvl. ${info.level}` : '';
         
-        if (action === 'reject') {
-            // SHOW REMOVE MODAL
+        if (action === 'remove') {
+            // SHOW REMOVE MODAL (for status 1 - Remove button)
             const removeTitle = document.getElementById('remove-title');
             const removeCopy = document.getElementById('remove-copy');
             
@@ -602,6 +602,23 @@
             removeCopy.appendChild(warningSpan);
             const suffixSpan = document.createTextNode(` — if you receive it again, its level and number of Pokémon defeated will return to their defaults.`);
             removeCopy.appendChild(suffixSpan);
+            
+            document.getElementById('remove-modal').classList.remove('hidden');
+            return;
+        }
+
+        if (action === 'reject') {
+            // SHOW REJECT MODAL (for status 0 - Reject button)
+            const removeTitle = document.getElementById('remove-title');
+            const removeCopy = document.getElementById('remove-copy');
+            
+            removeTitle.textContent = `Reject this month's challenge?`;
+            const displayName = info.name || 'this Mon';
+            removeCopy.innerHTML = '';
+            removeCopy.appendChild(document.createTextNode(`You will not receive ${displayName}${levelText}. `));
+            const warningSpan = document.createElement('strong');
+            warningSpan.textContent = 'You can still accept it later if you change your mind.';
+            removeCopy.appendChild(warningSpan);
             
             document.getElementById('remove-modal').classList.remove('hidden');
             return;
@@ -627,6 +644,10 @@
 
     function closeRemoveModal() {
         document.getElementById('remove-modal').classList.add('hidden');
+        // Clear pending action if it was set for this modal
+        if (pendingAction === 'reject' || pendingAction === 'remove') {
+            pendingAction = null;
+        }
     }
 
     function runAction() {
@@ -663,18 +684,31 @@
         const removeBtn = document.getElementById('remove-confirm');
         setLoadingState(removeBtn);
         
+        // Determine which action to call based on current status
+        // If status is 0, this is a Reject action; if status is 1, this is a Remove action
+        const isReject = (currentStatus === 0);
+        const actionName = isReject ? 'reject' : 'remove';
+        
         closeRemoveModal();
-        bridge.removeMon(function(result) {
+        
+        const callback = function(result) {
             if (result && result.ok) {
                 // Clear loading state before refresh so the button isn't stuck if the refresh fails
                 removeLoadingStates();
                 bridge.getMonthlyChallenge(render);
-                showToast('Monthly challenge removed.');
+                const message = isReject ? 'Challenge rejected.' : 'Monthly challenge removed.';
+                showToast(message);
             } else {
-                showToast((result && result.message) || 'Could not remove.', true);
+                showToast((result && result.message) || 'Could not complete action.', true);
                 removeLoadingStates();
             }
-        });
+        };
+
+        if (isReject) {
+            bridge.rejectMon(callback);
+        } else {
+            bridge.removeMon(callback);
+        }
     }
 
     function showToast(text, isError) {
