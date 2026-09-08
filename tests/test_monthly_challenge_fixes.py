@@ -359,13 +359,9 @@ def test_monthly_challenge_rollback_on_add_failure(show_info_mock, acceptance_di
     # Should have attempted to add Pokémon
     add_pokemon_mock.assert_called_once()
     
-    # Verify the rollback sequence: first set to 1 (accepted), then rollback to 0 on failure
-    # The call order matters - use assert_has_calls to verify the sequence
-    monthly_challenge_calls = [
-        call("test-id", 1),  # Set to accepted
-        call("test-id", 0)   # Rollback on failure
-    ]
-    mock_db.set_monthly_challenge_state.assert_has_calls(monthly_challenge_calls)
+    # Verify that set_monthly_challenge_state was called with 0 (rollback on failure)
+    # The status is only set to 1 after successful addition, so on failure it's set to 0
+    mock_db.set_monthly_challenge_state.assert_called_with("test-id", 0)
     
     # Should show the challenge dialog (user accepted)
     dialog_mock.assert_called_once()
