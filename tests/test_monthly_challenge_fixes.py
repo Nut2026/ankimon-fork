@@ -310,9 +310,8 @@ def test_monthly_challenge_reconciliation_branch(show_info_mock, dialog_mock, ad
 
     check_and_award_monthly_pokemon(logger, defer=False)
 
-    # Should reconcile tracking values
-    mock_db.set_user_data.assert_any_call("monthly_challenge_id", "test-id")
-    mock_db.set_user_data.assert_any_call("monthly_challenge", 1)
+    # Should reconcile tracking values using set_monthly_challenge_state
+    mock_db.set_monthly_challenge_state.assert_called_with("test-id", 1)
     
     # Should NOT add Pokémon (already exists) or show dialog
     add_pokemon_mock.assert_not_called()
@@ -361,13 +360,12 @@ def test_monthly_challenge_rollback_on_add_failure(show_info_mock, acceptance_di
     add_pokemon_mock.assert_called_once()
     
     # Verify the rollback sequence: first set to 1 (accepted), then rollback to 0 on failure
-    # The call order matters - cannot use assert_any_call because it can't distinguish the two writes
+    # The call order matters - use assert_has_calls to verify the sequence
     monthly_challenge_calls = [
-        call("monthly_challenge", 1),  # Set to accepted
-        call("monthly_challenge", 0)   # Rollback on failure
+        call("test-id", 1),  # Set to accepted
+        call("test-id", 0)   # Rollback on failure
     ]
-    mock_db.set_user_data.assert_has_calls(monthly_challenge_calls)
-    mock_db.set_user_data.assert_any_call("monthly_challenge_id", "test-id")
+    mock_db.set_monthly_challenge_state.assert_has_calls(monthly_challenge_calls)
     
     # Should show the challenge dialog (user accepted)
     dialog_mock.assert_called_once()
@@ -413,9 +411,8 @@ def test_monthly_challenge_rejection_sets_status(show_info_mock, rejection_dialo
     # Should NOT add Pokémon
     add_pokemon_mock.assert_not_called()
     
-    # Should set monthly_challenge to 2 (rejected)
-    mock_db.set_user_data.assert_any_call("monthly_challenge", 2)
-    mock_db.set_user_data.assert_any_call("monthly_challenge_id", "test-id")
+    # Should set monthly_challenge to 2 (rejected) using set_monthly_challenge_state
+    mock_db.set_monthly_challenge_state.assert_called_with("test-id", 2)
     
     # Should show the challenge dialog and rejection dialog
     dialog_mock.assert_called_once()
