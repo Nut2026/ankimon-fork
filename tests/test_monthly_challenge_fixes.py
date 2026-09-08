@@ -56,8 +56,9 @@ def mock_requests():
 @patch("Ankimon.pyobj.pokemon_trade.datetime")
 @patch("Ankimon.pyobj.pokemon_trade.add_pokemon_to_collection")
 @patch("Ankimon.pyobj.pokemon_trade.show_monthly_challenge_dialog")
+@patch("Ankimon.pyobj.pokemon_trade.show_monthly_acceptance_dialog")
 @patch("Ankimon.pyobj.pokemon_trade.utils.showInfo")
-def test_rate_this_check(show_info_mock, dialog_mock, add_pokemon_mock, datetime_mock, mock_requests, mock_mw, mock_db):
+def test_rate_this_check(show_info_mock, acceptance_dialog_mock, dialog_mock, add_pokemon_mock, datetime_mock, mock_requests, mock_mw, mock_db):
     logger = MockLogger()
 
     # Setup datetime to return known values
@@ -98,22 +99,26 @@ def test_rate_this_check(show_info_mock, dialog_mock, add_pokemon_mock, datetime
     check_and_award_monthly_pokemon(logger, defer=False)
     mock_requests.assert_called_once()
     add_pokemon_mock.assert_called_once()
+    acceptance_dialog_mock.assert_called_once()
 
     mock_requests.reset_mock()
     add_pokemon_mock.reset_mock()
+    acceptance_dialog_mock.reset_mock()
 
     # Test case 4: user rated using new boolean True
     mock_db.get_user_data.return_value = True
     check_and_award_monthly_pokemon(logger, defer=False)
     mock_requests.assert_called_once()
     add_pokemon_mock.assert_called_once()
+    acceptance_dialog_mock.assert_called_once()
 
 
 @patch("Ankimon.pyobj.pokemon_trade.datetime")
 @patch("Ankimon.pyobj.pokemon_trade.add_pokemon_to_collection")
 @patch("Ankimon.pyobj.pokemon_trade.show_monthly_challenge_dialog")
+@patch("Ankimon.pyobj.pokemon_trade.show_monthly_acceptance_dialog")
 @patch("Ankimon.pyobj.pokemon_trade.utils.showInfo")
-def test_previous_challenge_pokemon_null_check(show_info_mock, dialog_mock, add_pokemon_mock, datetime_mock, mock_requests, mock_mw, mock_db):
+def test_previous_challenge_pokemon_null_check(show_info_mock, acceptance_dialog_mock, dialog_mock, add_pokemon_mock, datetime_mock, mock_requests, mock_mw, mock_db):
     logger = MockLogger()
 
     # Setup datetime to return known values
@@ -159,13 +164,15 @@ def test_previous_challenge_pokemon_null_check(show_info_mock, dialog_mock, add_
     add_pokemon_mock.assert_called_once()
     added_pokemon = add_pokemon_mock.call_args[0][0]
     assert added_pokemon["shiny"] is False
+    acceptance_dialog_mock.assert_called_once()
 
 
 @patch("Ankimon.pyobj.pokemon_trade.datetime")
 @patch("Ankimon.pyobj.pokemon_trade.add_pokemon_to_collection")
 @patch("Ankimon.pyobj.pokemon_trade.show_monthly_challenge_dialog")
+@patch("Ankimon.pyobj.pokemon_trade.show_monthly_acceptance_dialog")
 @patch("Ankimon.pyobj.pokemon_trade.utils.showInfo")
-def test_previous_challenge_pokemon_has_enough_defeats(show_info_mock, dialog_mock, add_pokemon_mock, datetime_mock, mock_requests, mock_mw, mock_db):
+def test_previous_challenge_pokemon_has_enough_defeats(show_info_mock, acceptance_dialog_mock, dialog_mock, add_pokemon_mock, datetime_mock, mock_requests, mock_mw, mock_db):
     logger = MockLogger()
 
     dt_mock = MagicMock()
@@ -207,6 +214,7 @@ def test_previous_challenge_pokemon_has_enough_defeats(show_info_mock, dialog_mo
     add_pokemon_mock.assert_called_once()
     added_pokemon = add_pokemon_mock.call_args[0][0]
     assert added_pokemon["shiny"] is True
+    acceptance_dialog_mock.assert_called_once()
 
 
 @patch("Ankimon.pyobj.pokemon_trade.datetime")
@@ -314,53 +322,6 @@ def test_monthly_challenge_reconciliation_branch(show_info_mock, dialog_mock, ad
 @patch("Ankimon.pyobj.pokemon_trade.datetime")
 @patch("Ankimon.pyobj.pokemon_trade.add_pokemon_to_collection")
 @patch("Ankimon.pyobj.pokemon_trade.show_monthly_challenge_dialog")
-@patch("Ankimon.pyobj.pokemon_trade.show_monthly_rejection_dialog")
-@patch("Ankimon.pyobj.pokemon_trade.utils.showInfo")
-def test_monthly_challenge_rejection_sets_status(show_info_mock, rejection_dialog_mock, dialog_mock, add_pokemon_mock, datetime_mock, mock_requests, mock_mw, mock_db):
-    """Test that rejecting the monthly challenge sets monthly_challenge to 2."""
-    logger = MockLogger()
-
-    dt_mock = MagicMock()
-    dt_mock.month = 1
-    dt_mock.year = 2024
-    datetime_mock.now.return_value = dt_mock
-
-    mock_response = MagicMock()
-    mock_response.json.return_value = [
-        {
-            "month": "January 2024",
-            "pokemon": {
-                "name": "TestMon",
-                "id": 1,
-                "individual_id": "test-id"
-            }
-        }
-    ]
-    mock_requests.return_value = mock_response
-
-    mock_db.get_user_data.return_value = True
-    mock_db.get_pokemon.return_value = None
-
-    # User rejects the Pokémon
-    dialog_mock.return_value = False
-
-    check_and_award_monthly_pokemon(logger, defer=False)
-
-    # Should NOT add Pokémon
-    add_pokemon_mock.assert_not_called()
-    
-    # Should set monthly_challenge to 2 (rejected)
-    mock_db.set_user_data.assert_any_call("monthly_challenge", 2)
-    mock_db.set_user_data.assert_any_call("monthly_challenge_id", "test-id")
-    
-    # Should show the challenge dialog and rejection dialog
-    dialog_mock.assert_called_once()
-    rejection_dialog_mock.assert_called_once()
-
-
-@patch("Ankimon.pyobj.pokemon_trade.datetime")
-@patch("Ankimon.pyobj.pokemon_trade.add_pokemon_to_collection")
-@patch("Ankimon.pyobj.pokemon_trade.show_monthly_challenge_dialog")
 @patch("Ankimon.pyobj.pokemon_trade.show_monthly_acceptance_dialog")
 @patch("Ankimon.pyobj.pokemon_trade.utils.showInfo")
 def test_monthly_challenge_rollback_on_add_failure(show_info_mock, acceptance_dialog_mock, dialog_mock, add_pokemon_mock, datetime_mock, mock_requests, mock_mw, mock_db):
@@ -412,3 +373,50 @@ def test_monthly_challenge_rollback_on_add_failure(show_info_mock, acceptance_di
     dialog_mock.assert_called_once()
     # Should NOT show acceptance dialog (since add failed)
     acceptance_dialog_mock.assert_not_called()
+
+
+@patch("Ankimon.pyobj.pokemon_trade.datetime")
+@patch("Ankimon.pyobj.pokemon_trade.add_pokemon_to_collection")
+@patch("Ankimon.pyobj.pokemon_trade.show_monthly_challenge_dialog")
+@patch("Ankimon.pyobj.pokemon_trade.show_monthly_rejection_dialog")
+@patch("Ankimon.pyobj.pokemon_trade.utils.showInfo")
+def test_monthly_challenge_rejection_sets_status(show_info_mock, rejection_dialog_mock, dialog_mock, add_pokemon_mock, datetime_mock, mock_requests, mock_mw, mock_db):
+    """Test that rejecting the monthly challenge sets monthly_challenge to 2."""
+    logger = MockLogger()
+
+    dt_mock = MagicMock()
+    dt_mock.month = 1
+    dt_mock.year = 2024
+    datetime_mock.now.return_value = dt_mock
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = [
+        {
+            "month": "January 2024",
+            "pokemon": {
+                "name": "TestMon",
+                "id": 1,
+                "individual_id": "test-id"
+            }
+        }
+    ]
+    mock_requests.return_value = mock_response
+
+    mock_db.get_user_data.return_value = True
+    mock_db.get_pokemon.return_value = None
+
+    # User rejects the Pokémon
+    dialog_mock.return_value = False
+
+    check_and_award_monthly_pokemon(logger, defer=False)
+
+    # Should NOT add Pokémon
+    add_pokemon_mock.assert_not_called()
+    
+    # Should set monthly_challenge to 2 (rejected)
+    mock_db.set_user_data.assert_any_call("monthly_challenge", 2)
+    mock_db.set_user_data.assert_any_call("monthly_challenge_id", "test-id")
+    
+    # Should show the challenge dialog and rejection dialog
+    dialog_mock.assert_called_once()
+    rejection_dialog_mock.assert_called_once()
