@@ -709,16 +709,39 @@ def check_and_award_monthly_pokemon(logger, defer=True):
                 logger.log("error", f"Could not fetch monthly challenges; likely no internet connection. Details: {e}")
                 return None
 
-            current_challenge = next((c for c in monthly_challenges if c.get("month") == current_month_str), None)
+            if not isinstance(monthly_challenges, list):
+                logger.log("warning", "Monthly challenge data is not a list.")
+                return None
+
+            current_challenge = next((c for c in monthly_challenges if isinstance(c, dict) and c.get("month") == current_month_str), None)
 
             if not current_challenge:
                 logger.log("info", f"No monthly challenge found for {current_month_str}.")
                 return None
 
             challenge_pokemon_data = current_challenge.get("pokemon")
-            if not challenge_pokemon_data:
+            if not isinstance(challenge_pokemon_data, dict):
                 logger.log("warning", f"Monthly challenge for {current_month_str} is missing 'pokemon' data.")
                 return None
+
+            raw_pokemon_id = challenge_pokemon_data.get("id")
+            if isinstance(raw_pokemon_id, bool):
+                raw_pokemon_id = None
+            try:
+                pokemon_id = int(raw_pokemon_id)
+            except (TypeError, ValueError):
+                pokemon_id = 0
+            if pokemon_id <= 0:
+                logger.log("warning", f"Monthly challenge for {current_month_str} has an invalid Pokémon id.")
+                return None
+
+            pokemon_name = challenge_pokemon_data.get("name")
+            if not isinstance(pokemon_name, str) or not pokemon_name.strip():
+                logger.log("warning", f"Monthly challenge for {current_month_str} has an invalid Pokémon name.")
+                return None
+
+            challenge_pokemon_data = dict(challenge_pokemon_data)
+            challenge_pokemon_data["id"] = pokemon_id
 
             challenge_individual_id = challenge_pokemon_data.get("individual_id")
             if not challenge_individual_id:
@@ -743,14 +766,12 @@ def check_and_award_monthly_pokemon(logger, defer=True):
                     monthly_status == 0
                 )
                 if needs_reconciliation:
-                    db.set_user_data("monthly_challenge_id", challenge_individual_id)
-                    db.set_user_data("monthly_challenge", 1)
+                    db.set_monthly_challenge_state(challenge_individual_id, 1)
                     logger.log("info", f"Reconciled monthly challenge tracking: Pokémon {challenge_pokemon_data.get('name')} exists in collection, set monthly_challenge_id={challenge_individual_id}, monthly_challenge=1")
                     return None
 
             if last_challenge_id is None or str(last_challenge_id) != str(challenge_individual_id):
-                db.set_user_data("monthly_challenge_id", challenge_individual_id)
-                db.set_user_data("monthly_challenge", 0)
+                db.set_monthly_challenge_state(challenge_individual_id, 0)
                 monthly_status = 0
 
             if monthly_status == 2:
@@ -803,39 +824,32 @@ def check_and_award_monthly_pokemon(logger, defer=True):
         accepted = show_monthly_challenge_dialog(new_pokemon, description, parent_window=mw)
         if accepted:
             db = services.db
-            db.set_user_data("monthly_challenge", 1)
             success = add_pokemon_to_collection(new_pokemon, parent_window=mw)
             if success:
+                db.set_monthly_challenge_state(new_pokemon["individual_id"], 1)
                 shiny_text = " (Shiny)" if new_pokemon["shiny"] else ""
                 logger.log("info", f"Successfully awarded {new_pokemon['name']}{shiny_text}.")
                 show_monthly_acceptance_dialog(parent_window=mw, challenge_pokemon=new_pokemon)
             else:
-                db.set_user_data("monthly_challenge", 0)
+                db.set_monthly_challenge_state(new_pokemon["individual_id"], 0)
                 logger.log("error", f"Failed to add {new_pokemon['name']} to collection. Status rolled back.")
         else:
             db = services.db
-            db.set_user_data("monthly_challenge", 2)
+            db.set_monthly_challenge_state(new_pokemon["individual_id"], 2)
             show_monthly_rejection_dialog(parent_window=mw, challenge_pokemon=new_pokemon)
             shiny_text = " (Shiny)" if new_pokemon["shiny"] else ""
             logger.log("info", f"User rejected {new_pokemon['name']}{shiny_text}.")
 
-    # Defer execution to avoid blocking the profile_did_open callback
+    # Let Anki own the worker and invoke the completion callback on the GUI thread.
     if defer:
-        import threading
-        
-        def run_in_background():
+        def on_done(future):
+            """Handle the task-manager result on Anki's GUI thread."""
             try:
-                result = _fetch_monthly_data()
-                if result is not None:
-                    # Schedule the UI work on the main thread
-                    from aqt.qt import QTimer
-                    QTimer.singleShot(0, lambda: _process_on_main_thread(result))
+                _process_on_main_thread(future.result())
             except Exception as e:
-                logger.log("error", f"Error in background monthly check: {e}")
-        
-        # Start the background thread for the HTTP request
-        thread = threading.Thread(target=run_in_background, daemon=True)
-        thread.start()
+                logger.log("error", f"Error completing monthly check: {e}")
+
+        mw.taskman.run_in_background(_fetch_monthly_data, on_done)
     else:
         # Non-deferred: run everything on the main thread (for tests)
         result = _fetch_monthly_data()
