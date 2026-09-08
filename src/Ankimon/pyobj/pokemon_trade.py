@@ -102,6 +102,7 @@ def _build_sprite_box(container_size, sprite_size, challenge_pokemon, show_sprit
             
             if os.path.exists(sprite_path):
                 movie = QMovie(sprite_path)
+                movie.setParent(sprite_label)  # Keep movie alive with the label
                 sprite_label.setMovie(movie)
                 movie.start()
         except Exception:
@@ -686,12 +687,13 @@ def check_and_award_monthly_pokemon(logger, defer=True):
           interrupting the user's Anki session
     """
 
-    def _do_check():
+    def _fetch_monthly_data():
+        """Fetch monthly challenge data in background thread. Returns dict or None."""
         try:
             db = services.db
             if db.get_user_data("rate_this") not in (True, "true"):
                 logger.log("info", "Monthly Pokemon check skipped: user has not rated the addon.")
-                return
+                return None
 
             logger.log("info", "Checking for monthly challenge Pokemon award.")
             now = datetime.now()
@@ -705,23 +707,23 @@ def check_and_award_monthly_pokemon(logger, defer=True):
                 monthly_challenges = response.json()
             except requests.exceptions.RequestException as e:
                 logger.log("error", f"Could not fetch monthly challenges; likely no internet connection. Details: {e}")
-                return  # Exit gracefully if fetching fails
+                return None
 
             current_challenge = next((c for c in monthly_challenges if c.get("month") == current_month_str), None)
 
             if not current_challenge:
                 logger.log("info", f"No monthly challenge found for {current_month_str}.")
-                return
+                return None
 
             challenge_pokemon_data = current_challenge.get("pokemon")
             if not challenge_pokemon_data:
                 logger.log("warning", f"Monthly challenge for {current_month_str} is missing 'pokemon' data.")
-                return
+                return None
 
             challenge_individual_id = challenge_pokemon_data.get("individual_id")
             if not challenge_individual_id:
                 logger.log("warning", f"Monthly challenge for {current_month_str} is missing 'individual_id' in 'pokemon' data.")
-                return
+                return None
 
             last_challenge_id = db.get_user_data("monthly_challenge_id")
             monthly_status = db.get_user_data("monthly_challenge", 0)
@@ -735,7 +737,6 @@ def check_and_award_monthly_pokemon(logger, defer=True):
             
             # RECONCILE FIRST: If Pokémon exists in collection, sync tracking before any reset
             if pokemon_in_collection:
-                # Check if we need to reconcile (stale/missing tracking)
                 needs_reconciliation = (
                     last_challenge_id is None or 
                     str(last_challenge_id) != str(challenge_individual_id) or
@@ -745,7 +746,7 @@ def check_and_award_monthly_pokemon(logger, defer=True):
                     db.set_user_data("monthly_challenge_id", challenge_individual_id)
                     db.set_user_data("monthly_challenge", 1)
                     logger.log("info", f"Reconciled monthly challenge tracking: Pokémon {challenge_pokemon_data.get('name')} exists in collection, set monthly_challenge_id={challenge_individual_id}, monthly_challenge=1")
-                    return
+                    return None
 
             if last_challenge_id is None or str(last_challenge_id) != str(challenge_individual_id):
                 db.set_user_data("monthly_challenge_id", challenge_individual_id)
@@ -754,11 +755,11 @@ def check_and_award_monthly_pokemon(logger, defer=True):
 
             if monthly_status == 2:
                 logger.log("info", f"Monthly challenge for {current_month_str} was rejected.")
-                return
+                return None
 
             if monthly_status == 1 and pokemon_in_collection:
                 logger.log("info", f"User already has the Pokémon for {current_month_str} (ID: {challenge_individual_id}).")
-                return
+                return None
 
             logger.log("info", f"Awarding Pokémon for {current_month_str}: {challenge_pokemon_data.get('name')}")
             make_shiny = False
@@ -778,36 +779,57 @@ def check_and_award_monthly_pokemon(logger, defer=True):
                         make_shiny = True
             
             new_pokemon = create_monthly_challenge_pokemon(challenge_pokemon_data, make_shiny=make_shiny)
-            shiny_text = " (Shiny)" if new_pokemon["shiny"] else ""
             description = current_challenge.get("description", "")
-            accepted = show_monthly_challenge_dialog(new_pokemon, description, parent_window=mw)
-            if accepted:
-                db.set_user_data("monthly_challenge", 1)
-                success = add_pokemon_to_collection(new_pokemon, parent_window=mw)
-                if success:
-                    logger.log("info", f"Successfully awarded {new_pokemon['name']}{shiny_text}.")
-                    show_monthly_acceptance_dialog(parent_window=mw, challenge_pokemon=new_pokemon)
-                else:
-                    db.set_user_data("monthly_challenge", 0)
-                    logger.log("error", f"Failed to add {new_pokemon['name']} to collection. Status rolled back.")
-            else:
-                db.set_user_data("monthly_challenge", 2)
-                show_monthly_rejection_dialog(parent_window=mw, challenge_pokemon=new_pokemon)
-                logger.log("info", f"User rejected {new_pokemon['name']}{shiny_text}.")
+            
+            return {
+                "new_pokemon": new_pokemon,
+                "description": description,
+                "challenge_pokemon_data": challenge_pokemon_data
+            }
 
         except Exception as e:
-            logger.log("error", f"An unexpected error occurred in check_and_award_monthly_pokemon: {e}")
-            # Still failing silently on the user's end, but with more detailed logs for debugging.
-            pass
+            logger.log("error", f"An unexpected error occurred while fetching monthly data: {e}")
+            return None
+
+    def _process_on_main_thread(result_data):
+        """Process the monthly challenge award on the main thread."""
+        if result_data is None:
+            return
+        
+        new_pokemon = result_data["new_pokemon"]
+        description = result_data["description"]
+        challenge_pokemon_data = result_data["challenge_pokemon_data"]
+        
+        accepted = show_monthly_challenge_dialog(new_pokemon, description, parent_window=mw)
+        if accepted:
+            db = services.db
+            db.set_user_data("monthly_challenge", 1)
+            success = add_pokemon_to_collection(new_pokemon, parent_window=mw)
+            if success:
+                shiny_text = " (Shiny)" if new_pokemon["shiny"] else ""
+                logger.log("info", f"Successfully awarded {new_pokemon['name']}{shiny_text}.")
+                show_monthly_acceptance_dialog(parent_window=mw, challenge_pokemon=new_pokemon)
+            else:
+                db.set_user_data("monthly_challenge", 0)
+                logger.log("error", f"Failed to add {new_pokemon['name']} to collection. Status rolled back.")
+        else:
+            db = services.db
+            db.set_user_data("monthly_challenge", 2)
+            show_monthly_rejection_dialog(parent_window=mw, challenge_pokemon=new_pokemon)
+            shiny_text = " (Shiny)" if new_pokemon["shiny"] else ""
+            logger.log("info", f"User rejected {new_pokemon['name']}{shiny_text}.")
 
     # Defer execution to avoid blocking the profile_did_open callback
-    # Run the blocking HTTP request in a background thread to avoid UI freeze
     if defer:
         import threading
         
         def run_in_background():
             try:
-                _do_check()
+                result = _fetch_monthly_data()
+                if result is not None:
+                    # Schedule the UI work on the main thread
+                    from aqt.qt import QTimer
+                    QTimer.singleShot(0, lambda: _process_on_main_thread(result))
             except Exception as e:
                 logger.log("error", f"Error in background monthly check: {e}")
         
@@ -815,7 +837,10 @@ def check_and_award_monthly_pokemon(logger, defer=True):
         thread = threading.Thread(target=run_in_background, daemon=True)
         thread.start()
     else:
-        _do_check()
+        # Non-deferred: run everything on the main thread (for tests)
+        result = _fetch_monthly_data()
+        if result is not None:
+            _process_on_main_thread(result)
 
 def parse_to_canonical(code_str):
     if not code_str:
