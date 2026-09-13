@@ -650,17 +650,18 @@ def show_monthly_rejection_dialog(parent_window=None, challenge_pokemon=None):
 def check_and_award_monthly_pokemon(logger, defer=True):
     """
     Check for and award the current month's challenge Pokémon to the user.
-    
+
     This function handles the complete monthly challenge workflow including:
     1. Verifying the user has rated the addon (required for eligibility)
     2. Fetching the current month's challenge data from a remote JSON source
     3. Checking if the Pokémon has already been claimed or rejected
     4. Handling edge cases where database tracking values are out of sync
     5. Determining shiny eligibility based on previous challenge performance
-    6. Presenting the challenge dialog to the user
+    6. Restoring an accepted Pokémon that has gone missing, or presenting the
+       challenge dialog when the user has not decided yet
     7. Recording the user's decision (accept/reject) in the database
     8. Adding the Pokémon to the user's collection if accepted
-    
+
     Side Effects:
         - Reads/writes user_data in the database:
             - 'rate_this': Read to check eligibility
@@ -668,11 +669,21 @@ def check_and_award_monthly_pokemon(logger, defer=True):
             - 'monthly_challenge': Read/write (0=unclaimed, 1=accepted, 2=rejected)
         - Fetches data from a remote GitHub URL (monthly_challenges.json)
         - May add a new Pokémon to the user's collection via add_pokemon_to_collection()
-        - May display modal dialogs (show_monthly_challenge_dialog, 
+        - May display modal dialogs (show_monthly_challenge_dialog,
           show_monthly_acceptance_dialog, show_monthly_rejection_dialog)
         - Logs all major events and errors via the provided logger
-    
+
     Notes:
+        - Threading: with defer=True only the HTTP request, JSON parsing and
+          validation run on the background thread. Every database read and
+          write, the dialogs and the award run in the GUI-thread callback.
+          The database identity and the open Anki collection are captured
+          before dispatch and checked when the result arrives and again after
+          the decision dialog closes; if the database was switched or the
+          profile closed in between, the result is dropped.
+        - Accepted (1) with the Pokémon missing re-awards it without asking
+          again. A failed re-award keeps the status at 1, so the next check
+          retries the restore instead of prompting.
         - Shiny eligibility: If a previous challenge Pokémon exists and has
           defeated at least the threshold number of Pokémon, the current
           challenge Pokémon will be shiny
@@ -687,20 +698,15 @@ def check_and_award_monthly_pokemon(logger, defer=True):
           interrupting the user's Anki session
     """
 
-    def _fetch_monthly_data():
-        """Fetch monthly challenge data in background thread. Returns dict or None."""
-        try:
-            db = services.db
-            if db.get_user_data("rate_this") not in (True, "true"):
-                logger.log("info", "Monthly Pokemon check skipped: user has not rated the addon.")
-                return None
+    def _fetch_monthly_data(current_month_str):
+        """Fetch and validate this month's challenge. Returns dict or None.
 
-            logger.log("info", "Checking for monthly challenge Pokemon award.")
-            now = datetime.now()
-            month_names = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
-            current_month_str = f"{month_names[now.month - 1]} {now.year}"
+        Runs on the background thread, so it must not touch the database: the
+        active save can be switched while the request is in flight.
+        """
+        try:
             monthly_data_url = "https://raw.githubusercontent.com/h0tp-ftw/ankimon/refs/heads/main/assets/challenges/monthly_challenges.json"
-            
+
             try:
                 response = requests.get(monthly_data_url, timeout=2)
                 response.raise_for_status()
@@ -748,63 +754,8 @@ def check_and_award_monthly_pokemon(logger, defer=True):
                 logger.log("warning", f"Monthly challenge for {current_month_str} is missing 'individual_id' in 'pokemon' data.")
                 return None
 
-            last_challenge_id = db.get_user_data("monthly_challenge_id")
-            monthly_status = db.get_user_data("monthly_challenge", 0)
-            try:
-                monthly_status = int(monthly_status)
-            except (TypeError, ValueError):
-                monthly_status = 0
-
-            # Edge case: Pokémon exists in collection but database tracking values are missing or stale
-            pokemon_in_collection = db.get_pokemon(challenge_individual_id) is not None
-            
-            # RECONCILE FIRST: If Pokémon exists in collection, sync tracking before any reset
-            if pokemon_in_collection:
-                needs_reconciliation = (
-                    last_challenge_id is None or 
-                    str(last_challenge_id) != str(challenge_individual_id) or
-                    monthly_status == 0
-                )
-                if needs_reconciliation:
-                    db.set_monthly_challenge_state(challenge_individual_id, 1)
-                    logger.log("info", f"Reconciled monthly challenge tracking: Pokémon {challenge_pokemon_data.get('name')} exists in collection, set monthly_challenge_id={challenge_individual_id}, monthly_challenge=1")
-                    return None
-
-            if last_challenge_id is None or str(last_challenge_id) != str(challenge_individual_id):
-                db.set_monthly_challenge_state(challenge_individual_id, 0)
-                monthly_status = 0
-
-            if monthly_status == 2:
-                logger.log("info", f"Monthly challenge for {current_month_str} was rejected.")
-                return None
-
-            if monthly_status == 1 and pokemon_in_collection:
-                logger.log("info", f"User already has the Pokémon for {current_month_str} (ID: {challenge_individual_id}).")
-                return None
-
-            logger.log("info", f"Awarding Pokémon for {current_month_str}: {challenge_pokemon_data.get('name')}")
-            make_shiny = False
-            prev_id = current_challenge.get("previous_challenge_individual_id")
-            threshold = current_challenge.get("defeat_threshold")
-
-            if prev_id and threshold:
-                logger.log("info", f"Checking for shiny eligibility: prev_id={prev_id}, threshold={threshold}")
-                previous_challenge_pokemon = db.get_pokemon(prev_id)
-                if previous_challenge_pokemon:
-                    try:
-                        meets_threshold = int(previous_challenge_pokemon.get("pokemon_defeated", 0)) >= int(threshold)
-                    except (ValueError, TypeError):
-                        meets_threshold = False
-                    if meets_threshold:
-                        logger.log("info", f"Shiny criteria met for {challenge_pokemon_data.get('name')}.")
-                        make_shiny = True
-            
-            new_pokemon = create_monthly_challenge_pokemon(challenge_pokemon_data, make_shiny=make_shiny)
-            description = current_challenge.get("description", "")
-            
             return {
-                "new_pokemon": new_pokemon,
-                "description": description,
+                "current_challenge": current_challenge,
                 "challenge_pokemon_data": challenge_pokemon_data
             }
 
@@ -812,49 +763,156 @@ def check_and_award_monthly_pokemon(logger, defer=True):
             logger.log("error", f"An unexpected error occurred while fetching monthly data: {e}")
             return None
 
-    def _process_on_main_thread(result_data):
-        """Process the monthly challenge award on the main thread."""
+    def _session_unchanged(db, db_token, col):
+        """Return True while the database and Anki profile are the ones seen at dispatch."""
+        try:
+            return services.db is db and mw.col is col and db.identity_token() == db_token
+        except Exception:
+            return False
+
+    def _process_on_main_thread(result_data, db, db_token, col, current_month_str):
+        """Apply the fetched challenge to the database on the main thread."""
         if result_data is None:
             return
-        
-        new_pokemon = result_data["new_pokemon"]
-        description = result_data["description"]
+
+        if not _session_unchanged(db, db_token, col):
+            logger.log("info", "Discarded the monthly challenge result: the Ankimon database or Anki profile changed while it was being fetched.")
+            return
+
+        current_challenge = result_data["current_challenge"]
         challenge_pokemon_data = result_data["challenge_pokemon_data"]
-        
+        challenge_individual_id = challenge_pokemon_data["individual_id"]
+
+        last_challenge_id = db.get_user_data("monthly_challenge_id")
+        monthly_status = db.get_user_data("monthly_challenge", 0)
+        try:
+            monthly_status = int(monthly_status)
+        except (TypeError, ValueError):
+            monthly_status = 0
+
+        # Edge case: Pokémon exists in collection but database tracking values are missing or stale
+        pokemon_in_collection = db.get_pokemon(challenge_individual_id) is not None
+
+        # RECONCILE FIRST: If Pokémon exists in collection, sync tracking before any reset
+        if pokemon_in_collection:
+            needs_reconciliation = (
+                last_challenge_id is None or
+                str(last_challenge_id) != str(challenge_individual_id) or
+                monthly_status == 0
+            )
+            if needs_reconciliation:
+                db.set_monthly_challenge_state(challenge_individual_id, 1)
+                logger.log("info", f"Reconciled monthly challenge tracking: Pokémon {challenge_pokemon_data.get('name')} exists in collection, set monthly_challenge_id={challenge_individual_id}, monthly_challenge=1")
+                return
+
+        if last_challenge_id is None or str(last_challenge_id) != str(challenge_individual_id):
+            db.set_monthly_challenge_state(challenge_individual_id, 0)
+            monthly_status = 0
+
+        if monthly_status == 2:
+            logger.log("info", f"Monthly challenge for {current_month_str} was rejected.")
+            return
+
+        if monthly_status == 1 and pokemon_in_collection:
+            logger.log("info", f"User already has the Pokémon for {current_month_str} (ID: {challenge_individual_id}).")
+            return
+
+        logger.log("info", f"Awarding Pokémon for {current_month_str}: {challenge_pokemon_data.get('name')}")
+        make_shiny = False
+        prev_id = current_challenge.get("previous_challenge_individual_id")
+        threshold = current_challenge.get("defeat_threshold")
+
+        if prev_id and threshold:
+            logger.log("info", f"Checking for shiny eligibility: prev_id={prev_id}, threshold={threshold}")
+            previous_challenge_pokemon = db.get_pokemon(prev_id)
+            if previous_challenge_pokemon:
+                try:
+                    meets_threshold = int(previous_challenge_pokemon.get("pokemon_defeated", 0)) >= int(threshold)
+                except (ValueError, TypeError):
+                    meets_threshold = False
+                if meets_threshold:
+                    logger.log("info", f"Shiny criteria met for {challenge_pokemon_data.get('name')}.")
+                    make_shiny = True
+
+        new_pokemon = create_monthly_challenge_pokemon(challenge_pokemon_data, make_shiny=make_shiny)
+        shiny_text = " (Shiny)" if new_pokemon["shiny"] else ""
+
+        if monthly_status == 1:
+            # Already accepted, but the Pokémon is gone: restore it without
+            # asking again. The status stays 1 either way, so a failed restore
+            # is retried on the next check rather than turned into a prompt.
+            if add_pokemon_to_collection(new_pokemon, parent_window=mw):
+                logger.log("info", f"Re-awarded accepted monthly challenge Pokémon {new_pokemon['name']}{shiny_text}.")
+                show_monthly_acceptance_dialog(parent_window=mw, challenge_pokemon=new_pokemon)
+            else:
+                logger.log("error", f"Failed to re-award {new_pokemon['name']}; monthly challenge stays accepted and will retry.")
+            return
+
+        description = current_challenge.get("description", "")
         accepted = show_monthly_challenge_dialog(new_pokemon, description, parent_window=mw)
+
+        # exec() runs a nested event loop, so a sync hook can switch the
+        # database while the dialog is open. Never record the decision into a
+        # different save than the one it was offered for.
+        if not _session_unchanged(db, db_token, col):
+            logger.log("warning", "Discarded the monthly challenge decision: the Ankimon database or Anki profile changed while the dialog was open.")
+            return
+
         if accepted:
-            db = services.db
             success = add_pokemon_to_collection(new_pokemon, parent_window=mw)
             if success:
                 db.set_monthly_challenge_state(new_pokemon["individual_id"], 1)
-                shiny_text = " (Shiny)" if new_pokemon["shiny"] else ""
                 logger.log("info", f"Successfully awarded {new_pokemon['name']}{shiny_text}.")
                 show_monthly_acceptance_dialog(parent_window=mw, challenge_pokemon=new_pokemon)
             else:
                 db.set_monthly_challenge_state(new_pokemon["individual_id"], 0)
                 logger.log("error", f"Failed to add {new_pokemon['name']} to collection. Status rolled back.")
         else:
-            db = services.db
             db.set_monthly_challenge_state(new_pokemon["individual_id"], 2)
             show_monthly_rejection_dialog(parent_window=mw, challenge_pokemon=new_pokemon)
-            shiny_text = " (Shiny)" if new_pokemon["shiny"] else ""
             logger.log("info", f"User rejected {new_pokemon['name']}{shiny_text}.")
+
+    try:
+        db = services.db
+        if db.get_user_data("rate_this") not in (True, "true"):
+            logger.log("info", "Monthly Pokemon check skipped: user has not rated the addon.")
+            return
+        # Captured on the main thread before the worker starts, so the
+        # callback can tell whether the database was switched or the profile
+        # closed under it. Every Anki profile shares the Ankimon DB, so the
+        # collection object is what marks a profile session.
+        db_token = db.identity_token()
+        col = mw.col
+    except Exception as e:
+        logger.log("error", f"An unexpected error occurred while starting the monthly check: {e}")
+        return
+
+    logger.log("info", "Checking for monthly challenge Pokemon award.")
+    now = datetime.now()
+    month_names = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+    current_month_str = f"{month_names[now.month - 1]} {now.year}"
+
+    def _complete(result_data):
+        try:
+            _process_on_main_thread(result_data, db, db_token, col, current_month_str)
+        except Exception as e:
+            logger.log("error", f"Error completing monthly check: {e}")
 
     # Let Anki own the worker and invoke the completion callback on the GUI thread.
     if defer:
         def on_done(future):
             """Handle the task-manager result on Anki's GUI thread."""
             try:
-                _process_on_main_thread(future.result())
+                result_data = future.result()
             except Exception as e:
                 logger.log("error", f"Error completing monthly check: {e}")
+                return
+            _complete(result_data)
 
-        mw.taskman.run_in_background(_fetch_monthly_data, on_done)
+        mw.taskman.run_in_background(lambda: _fetch_monthly_data(current_month_str), on_done)
     else:
-        # Non-deferred: run everything on the main thread (for tests)
-        result = _fetch_monthly_data()
-        if result is not None:
-            _process_on_main_thread(result)
+        # Non-deferred: run everything on the calling thread (for tests)
+        _complete(_fetch_monthly_data(current_month_str))
 
 def parse_to_canonical(code_str):
     if not code_str:

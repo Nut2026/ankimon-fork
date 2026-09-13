@@ -503,6 +503,17 @@ class AnkimonDB:
             self._local_conn.conn = None
         return True
 
+    def identity_token(self) -> tuple:
+        """Identify the database generation currently behind this manager.
+
+        ``switch_database`` and a live file replacement both drain the current
+        connection generation, so either one changes this token. Work that
+        captures it, leaves the GUI thread and comes back can compare it to
+        tell whether it is still talking to the same save.
+        """
+        with self._conn_lock:
+            return (str(self.db_path), self._connection_epoch)
+
     def close(self, wait_seconds: float = 0.0) -> bool:
         """Close the current generation within one shared deadline."""
         with self._conn_lock:

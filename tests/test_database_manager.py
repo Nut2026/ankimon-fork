@@ -618,6 +618,29 @@ def test_switch_database_aborts_when_connections_do_not_drain(temp_env):
     assert db.db_path == original_path
 
 
+def test_identity_token_changes_with_each_database_generation(temp_env):
+    db, _ = temp_env
+    before = db.identity_token()
+
+    db.set_monthly_challenge_state("test-id", 1)
+    db.get_user_data("monthly_challenge")
+    assert db.identity_token() == before
+
+    db.switch_database("ankimonDEV.db")
+    on_dev = db.identity_token()
+    assert on_dev != before
+
+    # Back on the same file, but a new generation: work captured before the
+    # round trip must still see that the database changed under it.
+    db.switch_database("ankimon.db")
+    after_round_trip = db.identity_token()
+    assert after_round_trip not in (before, on_dev)
+
+    # A live file replacement drains the connections through close().
+    assert db.close(2.0)
+    assert db.identity_token() != after_round_trip
+
+
 def test_close_deduplicates_wrappers_and_shares_deadline(temp_env):
     import weakref
 
