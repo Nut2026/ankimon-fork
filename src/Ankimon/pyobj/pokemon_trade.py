@@ -354,9 +354,8 @@ def show_monthly_challenge_dialog(challenge_pokemon, description, parent_window=
     layout.addLayout(content_layout)
 
     discord_label = QLabel(
-        f'For more information on monthly challenges and to redeem higher-tier prizes (spoiler: where Shinies are involved!)'
-        f' for your performance, please check the '
-        f'<a href="https://discord.gg/Fd6fZYQx4r" style="color: {accent_blue}; text-decoration: none;">Ankimon Discord</a>!'
+        f'For more information, please check the '
+        f'<a href="https://discord.gg/hcq53X5mcu" style="color: {accent_blue}; text-decoration: none;">Ankimon Discord</a>!'
     )
     discord_label.setWordWrap(True)
     discord_label.setStyleSheet(f"color: {text}; font-size: 0.85rem;")
