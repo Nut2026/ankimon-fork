@@ -51,6 +51,7 @@ class _FakeItemDB:
     def __init__(self, inventory=None):
         self.inventory = dict(inventory or {})
         self.quantity_calls = []
+        self.history = []
 
     def get_item(self, item_name):
         if item_name not in self.inventory:
@@ -87,6 +88,14 @@ class _FakeItemDB:
         else:
             self.inventory[item_name] = new
         return new
+
+    def add_item(self, item_name, count):
+        self.quantity_calls.append((item_name, count))
+        self.inventory[item_name] = self.inventory.get(item_name, 0) + count
+
+    def add_mobile_history_entry(self, entry):
+        self.history.append(entry)
+        return True
 
 
 class _FakePokemon:
@@ -183,6 +192,68 @@ def _make_window(mod, db, main_pokemon=None):
     mod.receive_badge = MagicMock()
     mod.play_effect_sound = MagicMock()
     return win
+
+
+def _escape_window(mod, db, monkeypatch, encounter):
+    """Supply the two lazy imports used by the real escape handler."""
+    companion = types.SimpleNamespace(name="Bulbasaur", level=12, individual_id="p1")
+    enemy = types.SimpleNamespace(id=25, name="Pikachu", level=8, shiny=False)
+    win = _make_window(mod, db, companion)
+    win.enemy_pokemon = enemy
+    win.escape_items = {"poke-doll": True}
+    win.settings_obj.get.return_value = True
+    encounter_mod = types.ModuleType("Ankimon.functions.encounter_functions")
+    encounter_mod.new_pokemon = encounter
+    singletons_mod = types.ModuleType("Ankimon.singletons")
+    singletons_mod.get_test_window = lambda: "test-window"
+    singletons_mod.reviewer_obj = "reviewer"
+    monkeypatch.setitem(sys.modules, encounter_mod.__name__, encounter_mod)
+    monkeypatch.setitem(sys.modules, singletons_mod.__name__, singletons_mod)
+    return win, enemy
+
+
+def test_escape_consumes_one_item_and_records_previous_encounter(
+    item_window_mod, monkeypatch
+):
+    db = _FakeItemDB({"poke-doll": 2})
+
+    def next_encounter(enemy, *_args, **_kwargs):
+        enemy.name = "Rattata"
+
+    win, _enemy = _escape_window(item_window_mod, db, monkeypatch, next_encounter)
+    result = win.dispatch_use("poke-doll")
+
+    assert result["ok"] is True, (result, win.logger.mock_calls)
+    assert db.inventory["poke-doll"] == 1
+    assert db.quantity_calls == [("poke-doll", -1)]
+    assert len(db.history) == 1
+    assert db.history[0]["enemy_name"] == "Pikachu"
+    assert db.history[0]["outcome"] == "escaped"
+
+
+def test_escape_refuses_empty_bag_without_replacing_encounter(
+    item_window_mod, monkeypatch
+):
+    db = _FakeItemDB()
+    next_encounter = MagicMock()
+    win, _enemy = _escape_window(item_window_mod, db, monkeypatch, next_encounter)
+
+    assert win.dispatch_use("poke-doll")["ok"] is False
+    next_encounter.assert_not_called()
+    assert db.history == []
+
+
+def test_failed_escape_refunds_item_and_reports_failure(item_window_mod, monkeypatch):
+    db = _FakeItemDB({"poke-doll": 1})
+
+    def broken_encounter(*_args, **_kwargs):
+        raise RuntimeError("encounter failed")
+
+    win, _enemy = _escape_window(item_window_mod, db, monkeypatch, broken_encounter)
+
+    assert win.dispatch_use("poke-doll")["ok"] is False
+    assert db.inventory["poke-doll"] == 1
+    assert db.history == []
 
 
 def test_heal_consumes_exactly_one_item(item_window_mod):

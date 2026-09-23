@@ -1435,6 +1435,25 @@ def test_gallade_gender_gate_female():
     assert result["method"] == "item"
     assert "Needs to be Male to evolve into Gallade" in result["status_text"]
 
+
+@pytest.mark.parametrize(
+    ("species_id", "level", "gender", "evo_id", "item_form"),
+    [
+        (281, 30, "M", 282, "Gallade"),
+        (361, 42, "F", 362, "Froslass"),
+    ],
+)
+def test_ready_level_route_survives_item_alternative(
+    species_id, level, gender, evo_id, item_form
+):
+    result = fe.evolution_readiness(
+        {"id": species_id, "level": level, "friendship": 0, "gender": gender}
+    )
+    assert result["method"] == "level"
+    assert result["evo_id"] == evo_id
+    assert result["ready"] is True
+    assert item_form in result["item_status_text"]
+
 def test_trade_evolution_linking_cord():
     result = fe.evolution_readiness({"id": 67, "friendship": 0})
     assert result["method"] == "item"
