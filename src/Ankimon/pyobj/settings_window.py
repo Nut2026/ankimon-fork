@@ -355,7 +355,6 @@ class SettingsWindow(QMainWindow):
                         "settings": [
                             "SSH Access",
                             "Prevent Ankimon News on Startup",
-                            "AnkiWeb Sync",
                             "Developer Mode",
                         ]
                     },
@@ -380,6 +379,7 @@ class SettingsWindow(QMainWindow):
                     "Always Catch: Regional Form",
                     "Cards per Round",
                     "Review Based Damage",
+                    "Ignore Learning Cards",
                     "Friendship & Time Evolution",
                     "Auto-detect Time Zone",
                     "Time Zone UTC Offset",
@@ -403,7 +403,6 @@ class SettingsWindow(QMainWindow):
             },
             "Styling": {
                 "settings": [
-                    "Styling in Reviewer",
                     "Team Overview in Deck Overview",
                     "Animate Time",
                     "Show GIFs in Collection",
@@ -421,6 +420,7 @@ class SettingsWindow(QMainWindow):
                     "View Main Pokémon Front",
                     "XP Bar Location",
                     "Pop-Up on Defeat",
+                    "Pop-Up on Special Encounter",
                     "Pop-Up on Item Receive",
                 ],
                 "subgroups": {
@@ -440,6 +440,7 @@ class SettingsWindow(QMainWindow):
                             "Show Enemy Shiny Star",
                             "Show Player Shiny Star",
                             "Show Text Message Box in Reviewer",
+                            "Styling",
                         ]
                     }
                 }

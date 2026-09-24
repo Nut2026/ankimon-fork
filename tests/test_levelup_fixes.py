@@ -88,7 +88,7 @@ def test_save_main_pokemon_progress_caps_at_10_levelups():
     settings.get = lambda k, d=None: {
         "misc.remove_level_cap": True,
         "gui.pop_up_dialog_message_on_defeat": False,
-        "gui.styling_in_reviewer": False,
+        "gui.hud_styling": False,
         "gui.reviewer_text_message_box": False,
         "gui.reviewer_text_message_box_time": 4,
     }.get(k, d)
@@ -139,6 +139,7 @@ def test_save_main_pokemon_progress_caps_at_10_levelups():
         is_favorite=False,
         evolution_rejected=False,
         invalidate_cp_cache=lambda: None,
+        update_stats=lambda: None,
     )
     enemy = types.SimpleNamespace(ev_yield={})
     
@@ -195,7 +196,8 @@ def test_xp_share_gain_exp_caps_at_10_levelups():
     tf.check_evolution_for_pokemon = mock.MagicMock(return_value=None)
     
     try:
-        # Give massive XP (e.g. 2,000,000 XP, which is multiplied by 0.5 to 1,000,000 XP for XP share)
+        # Give massive XP (e.g. 2,000,000 XP — ORAS-style XP Share grants the
+        # holder that same full amount, no longer halved)
         xp_share_gain_exp(
             mock.MagicMock(), settings, None, "other_id", 2000000, "some_id"
         )

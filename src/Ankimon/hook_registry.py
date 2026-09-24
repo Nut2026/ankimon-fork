@@ -37,6 +37,11 @@ def CatchPokemonHook(collected_pokemon_ids):
             collected_pokemon_ids,
             achievements,
         )
+        # Resolve while this is still the defeated encounter. new_pokemon()
+        # mutates the enemy singleton, so its identity cannot be checked later.
+        from .battle_loop import _resolve_main_faint_for_enemy
+
+        _resolve_main_faint_for_enemy(main_pokemon, enemy_pokemon)
         new_pokemon(
             enemy_pokemon,
             get_test_window(),
@@ -44,7 +49,9 @@ def CatchPokemonHook(collected_pokemon_ids):
             reviewer_obj,
             update_hud=True,
         )
-    for hook in catch_pokemon_hooks:
+    # A hook can change this public bucket while it runs. Iterate a snapshot
+    # so later hooks still receive the completed catch.
+    for hook in list(catch_pokemon_hooks):
         hook()
 
 
@@ -58,6 +65,9 @@ def DefeatPokemonHook():
             achievements,
             trainer_card,
         )
+        from .battle_loop import _resolve_main_faint_for_enemy
+
+        _resolve_main_faint_for_enemy(main_pokemon, enemy_pokemon)
         new_pokemon(
             enemy_pokemon,
             get_test_window(),
@@ -65,5 +75,6 @@ def DefeatPokemonHook():
             reviewer_obj,
             update_hud=True,
         )
-    for hook in defeat_pokemon_hooks:
+    # See CatchPokemonHook: external hooks may mutate this bucket.
+    for hook in list(defeat_pokemon_hooks):
         hook()

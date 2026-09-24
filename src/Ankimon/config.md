@@ -37,6 +37,9 @@ Reviewer Pop Up Messages:
 Decide if you would like to see the anki popup messages in the anki reviewer when your pokemon levels up or when a wild pokemon is defeated
 - `pop_up_dialog_message_on_defeat` [True/False]
 
+Setting `gui.pop_up_dialog_message_on_encounter` to `true` pauses the review and shows a pop-up message when you encounter a Shiny or rare (tier 4 or higher) wild Pokémon.
+- `gui.pop_up_dialog_message_on_encounter` [True/False]
+
 Sounds:
 You can decide if you want Pokemon Battle Cries in the anki reviewer once a pokemon appears.
 - `sounds` [True/False]
@@ -95,6 +98,9 @@ Setting `catch_key` to a letter allows you to catch pokemons inside of the revie
 
 Setting `defeat_key` to a letter allows you to defeat pokemons inside of the reviewer when their hp reaches 0 by pressing control and your letter - default is F.
 - `defeat_key` [A - Z]
+
+Setting `controls.allow_to_choose_moves` to `true` allows the player to manually pick attack moves in battles with Keys 1-4 or by clicking them. Note: Enabling this applies a 50% penalty to all Pokémon XP and Trainer XP earned.
+- `controls.allow_to_choose_moves` [True/False]
 
 `review_hp_bar_thickness` sets the pixel thickness of the HP bar in the reviewer. 
 - Setting it to `2` will result in an 8px thickness.
