@@ -43,7 +43,7 @@ class BackupManager:
         self.settings_obj = settings_obj
         self.user_files_path = user_path
         self.addon_path = addon_dir
-        self.backups_path = self.addon_path.parent / "Ankimon_Backups"
+        self.backups_path: Optional[Path] = None
         self.refresh_profile_path()
 
     @staticmethod
@@ -82,6 +82,7 @@ class BackupManager:
     def refresh_profile_path(self) -> None:
         profile_folder = self._active_profile_folder()
         if profile_folder is None:
+            self.backups_path = None
             return
 
         try:
@@ -126,6 +127,8 @@ class BackupManager:
         summary so the dialog can read them without knowing about dual-DB.
         """
         backups = []
+        if self.backups_path is None:
+            return backups
         # If the database service isn't initialized yet (e.g. early boot or a
         # headless environment), there is no active mode to filter on — return an
         # empty list rather than crashing on ``None.db_path``.
@@ -175,6 +178,10 @@ class BackupManager:
         active-mode database when it is omitted. The result is about THAT file:
         each file is snapshotted in isolation below, so one file's failure
         neither blanks another file's success nor is hidden by it."""
+        if self.backups_path is None:
+            self.logger.log("error", "Cannot create backup without an active profile path")
+            return False
+
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         backup_dir = self.backups_path / f"backup_{timestamp}"
         staging_dir = self.backups_path / f".{backup_dir.name}"
@@ -796,6 +803,8 @@ class BackupManager:
 
     def cleanup_backups(self, deadline: float = None):
         """Deletes old backups based on retention policy."""
+        if self.backups_path is None:
+            return
         # Taken before this pass renames anything, so a removal that fails now
         # is retried by the next pass rather than twice in this one.
         leftovers = self._discarded()
@@ -826,6 +835,8 @@ class BackupManager:
         self._sweep_leftovers(deadline, leftovers)
 
     def _discarded(self) -> List[Path]:
+        if self.backups_path is None:
+            return []
         # A link counts even when dangling: _remove_tree removes the link itself.
         return [p for p in self.backups_path.glob(f"{self.DISCARD_PREFIX}*")
                 if p.is_dir() or p.is_symlink()]
@@ -838,6 +849,8 @@ class BackupManager:
         a caller took before renaming anything itself; by default it is taken
         here, before the staging sweep renames anything.
         """
+        if self.backups_path is None:
+            return
         if leftovers is None:
             leftovers = self._discarded()
 
