@@ -1297,3 +1297,39 @@ def test_a_backup_publishes_through_locks_that_clear(mock_env, monkeypatch):
     assert bm.create_backup(required_file="ankimon.db", deadline=time.monotonic() + 30) is True
     assert refused == ["snapshot", "folder"]
     assert len(list(bm.backups_path.glob("backup_*"))) == 1
+
+
+def test_backups_path_is_none_when_no_profile_resolves(mock_env, monkeypatch):
+    """A profileFolder() failure must not leave a stale path anchored.
+
+    If it did, a later create_backup could publish into the previous profile's
+    folder, where the current profile's get_backups cannot see it.
+    """
+    bm, _, _, _ = mock_env
+    # The fixture already anchored a real path; prove refresh clears it.
+    assert bm.backups_path is not None
+    monkeypatch.setattr("aqt.mw.pm.profileFolder",
+                        MagicMock(side_effect=RuntimeError("profile volume unavailable")))
+    bm.refresh_profile_path()
+    assert bm.backups_path is None
+
+
+def test_no_profile_means_no_backup_operations(mock_env, monkeypatch):
+    """Every entry point that touches backups_path must refuse when it is None."""
+    bm, _, user_files_dir, _ = mock_env
+    monkeypatch.setattr("aqt.mw.pm.profileFolder",
+                        MagicMock(side_effect=RuntimeError("profile volume unavailable")))
+    bm.refresh_profile_path()
+    assert bm.backups_path is None
+
+    # get_backups: nothing to list, and no crash on None.iterdir().
+    assert bm.get_backups() == []
+
+    # create_backup: refuse with a log line, write nothing.
+    assert bm.create_backup(required_file="ankimon.db") is False
+    assert not list(user_files_dir.iterdir())
+
+    # cleanup_backups and its helpers: no-op rather than AttributeError.
+    bm.cleanup_backups()
+    assert bm._discarded() == []
+    bm._sweep_leftovers()
