@@ -99,6 +99,13 @@ def mock_env(tmp_path):
     addon_dir = tmp_path / "Ankimon"
     addon_dir.mkdir()
 
+    # BackupManager anchors backups_path at mw.pm.profileFolder(). Point that at
+    # a real per-test folder: without it, Path(MagicMock(...)) stringifies to a
+    # junk path shared by every manager in the session, so backups created by
+    # other tests appear in this one's listing (and vice versa).
+    profile_folder = tmp_path / "profile"
+    profile_folder.mkdir(parents=True, exist_ok=True)
+
     # Mock resources within database_manager and backup_manager namespaces.
     # Also neutralize the interactive/UI helpers bound inside backup_manager:
     # in a full-suite run the real aqt.utils may already be imported, so the
@@ -111,7 +118,8 @@ def mock_env(tmp_path):
          patch.object(_bm_mod, "askUser", return_value=True), \
          patch.object(_bm_mod, "showInfo"), \
          patch.object(_bm_mod, "showWarning"), \
-         patch.object(_bm_mod, "close_anki"):
+         patch.object(_bm_mod, "close_anki"), \
+         patch("aqt.mw.pm.profileFolder", return_value=str(profile_folder)):
 
         # Instantiate test database manager
         db = AnkimonDB(MockLogger())
