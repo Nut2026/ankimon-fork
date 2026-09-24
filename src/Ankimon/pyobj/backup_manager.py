@@ -2,6 +2,7 @@
 import base64
 import json
 import os
+import shutil
 import datetime
 import sqlite3
 import tempfile
@@ -42,8 +43,54 @@ class BackupManager:
         self.settings_obj = settings_obj
         self.user_files_path = user_path
         self.addon_path = addon_dir
-        self.backups_path = self.addon_path.parent / "ankimon_backups"
-        self.backups_path.mkdir(exist_ok=True)
+        self.backups_path = self.addon_path.parent / "Ankimon_Backups"
+        self.refresh_profile_path()
+
+    @staticmethod
+    def _active_profile_folder() -> Optional[Path]:
+        try:
+            from aqt import mw
+            profile_manager = getattr(mw, "pm", None)
+            profile_folder = profile_manager.profileFolder() if profile_manager else None
+            return Path(profile_folder) if profile_folder else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _move_backup_contents(source: Path, destination: Path) -> None:
+        for item in source.iterdir():
+            target = destination / item.name
+            if target.exists():
+                if item.is_dir() and target.is_dir():
+                    BackupManager._move_backup_contents(item, target)
+                    item.rmdir()
+                else:
+                    raise FileExistsError(f"Backup migration collision: {target}")
+            else:
+                shutil.move(str(item), str(target))
+
+    def _migrate_legacy_backups(self, profile_folder: Path) -> None:
+        legacy_path = self.addon_path.parent / "ankimon_backups"
+        new_path = profile_folder / "Ankimon_Backups"
+        if not legacy_path.exists() or legacy_path == new_path:
+            return
+
+        new_path.mkdir(parents=True, exist_ok=True)
+        self._move_backup_contents(legacy_path, new_path)
+        legacy_path.rmdir()
+
+    def refresh_profile_path(self) -> None:
+        profile_folder = self._active_profile_folder()
+        if profile_folder is None:
+            return
+
+        try:
+            self._migrate_legacy_backups(profile_folder)
+        except Exception as error:
+            self.logger.log("error", f"Failed to migrate legacy backups: {error}")
+
+        self.backups_path = profile_folder / "Ankimon_Backups"
+        self.backups_path.mkdir(parents=True, exist_ok=True)
 
     def _deobfuscate_data(self, obfuscated_str: str) -> Optional[Dict[str, Any]]:
         """De-obfuscates string back into a dictionary."""
