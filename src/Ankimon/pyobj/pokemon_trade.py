@@ -312,7 +312,7 @@ def show_monthly_challenge_dialog(challenge_pokemon, description, parent_window=
     shiny_text = " (Shiny !!)" if challenge_pokemon.get("shiny", False) else ""
     title_label = QLabel(
         f"<span style='font-size: 1.2rem; font-weight: 800; letter-spacing: -0.3px; color: {text};'>"
-        f"!! You've received your monthly challenge Pokémon: "
+        f"!! Monthly Challenge Pokémon is here!: "
         f"<b>{escape(challenge_pokemon['name'])}{shiny_text}</b></span>"
     )
     title_label.setWordWrap(True)
