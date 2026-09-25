@@ -64,21 +64,39 @@ class BackupManager:
         return _is_link(path)
 
     @staticmethod
-    def _publish_via_staging(source: Path, destination: Path) -> None:
+    def _publish_via_staging(source: Path, destination: Path, relocations=None) -> None:
+        """Publish a complete copy; leave the original for the caller to remove."""
         destination.parent.mkdir(parents=True, exist_ok=True)
         staging = destination.with_name(
             f"{BackupManager.MIGRATING_PREFIX}{uuid.uuid4().hex[:8]}_{destination.name}"
         )
         try:
-            shutil.move(str(source), str(staging))
-        except Exception:
-            BackupManager._discard_migration_staging(staging)
-            raise
-        try:
+            BackupManager._copy_migration_entry(source, staging, destination, relocations)
+            if destination.exists() or BackupManager._is_link(destination):
+                raise FileExistsError(f"Backup migration collision: {destination}")
             os.replace(str(staging), str(destination))
         except Exception:
+            # Staging is only a copy, including after an interrupted publication.
             BackupManager._discard_migration_staging(staging)
             raise
+
+    @staticmethod
+    def _copy_migration_entry(source, staging, destination, relocations):
+        """Copy without following links; rebase links for their final location."""
+        if BackupManager._is_link(source):
+            target = BackupManager._relocate_link(source, destination, relocations)
+            if target is None:
+                raise OSError(f"Cannot preserve linked backup entry: {source}")
+            os.symlink(target, staging, target_is_directory=source.is_dir())
+        elif source.is_dir():
+            staging.mkdir()
+            for child in source.iterdir():
+                BackupManager._copy_migration_entry(
+                    child, staging / child.name, destination / child.name, relocations,
+                )
+            shutil.copystat(source, staging, follow_symlinks=False)
+        else:
+            shutil.copy2(source, staging, follow_symlinks=False)
 
     @staticmethod
     def _discard_migration_staging(staging: Path) -> None:
@@ -91,63 +109,67 @@ class BackupManager:
             pass
 
     @staticmethod
-    def _relocate_link(item: Path, destination: Path) -> Optional[str]:
+    def _relocate_link(item: Path, destination: Path, relocations=None) -> Optional[str]:
         try:
             referent = item.resolve(strict=False)
-        except OSError:
+        except (OSError, RuntimeError):
             return None
         if not referent.exists() and not referent.is_symlink():
             return None
+        # Resolve while every original still exists. Longest roots win so a
+        # collision-renamed backup overrides the mapping of the legacy root.
+        for original, relocated in sorted(
+            (relocations or {}).items(), key=lambda pair: len(pair[0].parts), reverse=True,
+        ):
+            try:
+                suffix = referent.relative_to(original)
+            except ValueError:
+                continue
+            referent = relocated / suffix
+            break
         try:
             return os.path.relpath(referent, destination.parent)
         except ValueError:
-            return None
+            # Relative paths cannot cross Windows drives.
+            return str(referent)
 
     @staticmethod
     def _move_backup_contents(source: Path, destination: Path) -> None:
-        """Move every entry from ``source`` into ``destination``.
+        """Copy, publish, then remove originals; never traverse directory links.
 
-        Keeps the source recoverable: entries are removed only after they have
-        been moved. A collision at the top level (a same-named backup directory
-        already present in the destination) is resolved by renaming the
-        colliding backup directory as a whole -- never its constituent files --
-        so the inner ``ankimon.db`` / ``ankimonDEV.db`` names stay intact and
-        ``get_backups()`` still lists and restores the legacy snapshot.
-
-        Directory links (symlinks, junctions) are never followed: recursing
-        through one would move files from outside the backups folder, and the
-        subsequent ``rmdir()`` would fail on the link itself. A link is moved
-        as a link, with its referent preserved for relative links. A cross-
-        volume move is staged in a hidden directory first, so a partial copy
-        can never appear under a published ``backup_*`` name.
+        Plan every name first so nested links and links to sibling backups can
+        refer to the final paths, including whole-directory collision renames.
+        No source is deleted until every entry has been published successfully.
         """
+        planned = []
+        reserved = set()
         for item in source.iterdir():
             target = destination / item.name
+            while target in reserved or target.exists() or BackupManager._is_link(target):
+                target = BackupManager._legacy_collision_name(destination / item.name)
+            planned.append((item, target))
+            reserved.add(target)
 
-            if BackupManager._is_link(item):
-                if target.exists() or target.is_symlink():
-                    target = BackupManager._legacy_collision_name(target)
-                new_target = BackupManager._relocate_link(item, target)
-                if new_target is None:
-                    raise OSError(
-                        f"Cannot preserve the referent of linked backup entry "
-                        f"{item.name}; leaving it in place."
-                    )
-                os.symlink(new_target, str(target), target_is_directory=item.is_dir())
+        relocations = {source.resolve(): destination.resolve()}
+        relocations.update({
+            item.resolve(): target.absolute()
+            for item, target in planned if not BackupManager._is_link(item)
+        })
+        for item, target in planned:
+            BackupManager._publish_via_staging(item, target, relocations)
+        # If a copy/publication above fails, retain every original and any
+        # already-published complete copies. Never delete a published snapshot
+        # to roll back a different entry's failure.
+
+        for item, _ in planned:
+            if item.is_symlink():
                 item.unlink()
-                continue
-
-            if target.exists():
-                if item.is_dir() and target.is_dir():
-                    renamed = BackupManager._legacy_collision_name(target)
-                    BackupManager._publish_via_staging(item, renamed)
-                else:
-                    renamed = target.with_name(
-                        f"{target.stem}__legacy_{uuid.uuid4().hex[:8]}{target.suffix}"
-                    )
-                    BackupManager._publish_via_staging(item, renamed)
+            elif BackupManager._is_link(item):
+                item.rmdir()  # Windows junction: remove the link, not its target.
+            elif item.is_dir():
+                shutil.rmtree(item)
             else:
-                BackupManager._publish_via_staging(item, target)
+                item.unlink()
 
     @staticmethod
     def _legacy_collision_name(target: Path) -> Path:
