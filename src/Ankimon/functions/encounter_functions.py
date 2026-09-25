@@ -82,6 +82,9 @@ settings_obj = None
 translator = None
 ankimon_db = None
 pokemon_pc = None
+RARE_ENCOUNTER_TIERS = frozenset(
+    {"Starter", "Ultra", "Gmax", "Legendary", "Mega", "Mythical"}
+)
 
 
 def _disp_name(pokemon) -> str:
@@ -1356,9 +1359,10 @@ def new_pokemon(
     if update_hud and reviewer_obj is not None:
         reviewer_obj.refresh_hud()
 
+    # Encounter tiers are names, not numeric ranks.
     # Show a popup message for rare/shiny Pokemon if the setting is enabled
     if not _in_bulk_resolve() and settings_obj.get("gui.pop_up_dialog_message_on_encounter") is True:
-        if pokemon.shiny or pokemon.tier >= 4:
+        if pokemon.shiny or pokemon.tier in RARE_ENCOUNTER_TIERS:
             if pokemon.shiny:
                 msg = f"A Shiny wild {get_pretty_name_for_name(pokemon.name)} appeared!"
             else:

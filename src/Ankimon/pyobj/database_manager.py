@@ -1846,6 +1846,37 @@ class AnkimonDB:
             )
         return consumed
 
+    def refund_item(self, item: Dict[str, Any], count: int = 1) -> None:
+        """Return spent units, retaining metadata if consumption deleted the row.
+
+        ``item`` is the record read before consumption. Increment the live stock
+        under SQLite's writer lock so a concurrent inventory change is retained.
+        Recreate a missing row through ``save_item`` for its ID collision handling.
+        """
+        if not isinstance(count, int) or count <= 0:
+            raise ValueError("An item refund must have a positive integer count")
+        conn = self._get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE items SET quantity = quantity + ? WHERE item_name = ?",
+                    (count, item["item_name"]),
+                )
+                if cursor.rowcount == 0:
+                    self.save_item(
+                        item.get("id"), item["item_name"], count,
+                        extra_data=item.get("extra_data"),
+                        category_id=item.get("category_id"),
+                        cost=item.get("cost"),
+                        fling_power=item.get("fling_power"),
+                        fling_effect_id=item.get("fling_effect_id"),
+                        commit=False,
+                    )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
     # --- Badge Operations ---
 
     def save_badge(self, badge_id: str, badge_data: Dict[str, Any]):

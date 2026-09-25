@@ -773,10 +773,9 @@ def evolution_readiness(pokemon: Any, now: Optional[datetime] = None) -> dict:
     """Compute manual-evolution readiness for a single Pokémon.
 
     Covers friendship/time, item-based, and plain level-up evolutions, so the PC's
-    "Evolve now" button and ✨ badge work. Friendship takes precedence
-    (``method="friendship"``); then item evolutions (``method="item"``);
-    otherwise a level-up evolution is considered (``method="level"``),
-    else ``method=None``. Accepts a dict or an object with
+    "Evolve now" button and ✨ badge work. Friendship takes precedence. A ready
+    level route takes precedence over an informational item hint; an unready
+    level route can appear alongside the item hint. Accepts a dict or an object with
     ``id`` / ``friendship`` / ``everstone`` / ``level`` (missing -> 0 / False / 1).
 
     Args:
@@ -824,6 +823,7 @@ def evolution_readiness(pokemon: Any, now: Optional[datetime] = None) -> dict:
         "rejected": False,
         "required_move_type": None,
         "gated_alternatives": (),
+        "item_status_text": "",
     }
 
     if species_id is None:
@@ -837,23 +837,10 @@ def evolution_readiness(pokemon: Any, now: Optional[datetime] = None) -> dict:
 
     evos = get_friendship_evolutions_for_species(species_id)
     if not evos:
-        # No friendship evolution — try an item-based evolution next.
-        item_readiness = _item_readiness(
-            species_id=species_id,
-            everstone=everstone,
-            friendship=friendship,
-            evolution_rejected=evolution_rejected,
-            not_evolvable=not_evolvable,
-            pokemon=pokemon,
-        )
-        if item_readiness["evolvable"]:
-            return item_readiness
-
-        # No item evolution either — fall back to a plain level-up evolution so
-        # the manual "Evolve now" path covers level evolvers too (auto level-ups
-        # are still handled by check_evolution_for_pokemon; this is for mons that
-        # rejected, hold an Everstone, or were caught above their evolve level).
-        return _level_readiness(
+        # A species can have both routes (Kirlia -> Gardevoir/Gallade,
+        # Snorunt -> Glalie/Froslass). Keep the manual level button when that
+        # route is ready, while still showing the alternative item hint.
+        level_readiness = _level_readiness(
             species_id=species_id,
             level=level,
             everstone=everstone,
@@ -863,6 +850,30 @@ def evolution_readiness(pokemon: Any, now: Optional[datetime] = None) -> dict:
             time_of_day=time_of_day,
             pokemon=pokemon,
         )
+        item_readiness = _item_readiness(
+            species_id=species_id,
+            everstone=everstone,
+            friendship=friendship,
+            evolution_rejected=evolution_rejected,
+            not_evolvable=not_evolvable,
+            pokemon=pokemon,
+        )
+        if level_readiness["ready"]:
+            if item_readiness["evolvable"]:
+                level_readiness["item_status_text"] = item_readiness["status_text"]
+            return level_readiness
+        if item_readiness["evolvable"]:
+            level_status = level_readiness["status_text"]
+            if (
+                level_readiness["evolvable"]
+                and level_status
+                and level_status != item_readiness["status_text"]
+            ):
+                item_readiness["status_text"] = (
+                    f"{item_readiness['status_text']} · {level_status}"
+                )
+            return item_readiness
+        return level_readiness
 
     known_move_types = _known_move_types(pokemon)
     chosen = _select_evolution(evos, time_of_day, known_move_types)

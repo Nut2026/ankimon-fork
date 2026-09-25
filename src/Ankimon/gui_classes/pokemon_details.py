@@ -415,6 +415,7 @@ def PokemonCollectionDetailsSplit(
         # previously rejected this evolution (soft state) — the manual button
         # stays available so they can still evolve on demand.
         evolution_note_widget = None
+        item_hint_widget = None
         # The friendship/time evolution feature is gated behind a master toggle,
         # so its UI must only appear when the toggle is on. Every other
         # evolution method (level, and any future methods) is base-game
@@ -423,43 +424,32 @@ def PokemonCollectionDetailsSplit(
             readiness["method"] != "friendship" or friendship_time_enabled
         )
         if show_evolution_ui:
-            # We want to show the Evolve button if the pokemon is completely ready,
-            # or if it has an item evolution and the UI wants to show an item trigger.
-            # `readiness["ready"]` is intentionally False for item evolutions
-            # to prevent auto-prompting on level-up.
-            show_button = readiness["ready"] or readiness["method"] == "item"
-            if trigger_evo_callback is None and show_button:
+            # Item evolutions are hints here; using an evolution item belongs to
+            # the Bag. Only a ready friendship or level route gets this button.
+            if trigger_evo_callback is None and readiness["ready"]:
                 evo_name = readiness["evo_name"] or "the next form"
-                if readiness["method"] == "item":
-                    evolve_now_button = QPushButton(f"✨ Use Evolution Item")
-                else:
-                    evolve_now_button = QPushButton(f"✨ Evolve into {evo_name} now")
+                evolve_now_button = QPushButton(f"✨ Evolve into {evo_name} now")
                 evolve_now_button.setFont(custom_font)
-                evolve_now_button.setFixedWidth(230)
                 evolve_now_button.setStyleSheet(
                     "QPushButton { background-color: #FF69B4; color: white;"
                     " border-radius: 6px; padding: 5px; font-weight: bold; }"
                     " QPushButton:hover { background-color: #FF8DC7; }"
                 )
+                evolve_now_button.setMinimumWidth(
+                    max(230, evolve_now_button.sizeHint().width())
+                )
 
                 def evolve_now():
-                    if readiness["method"] == "item":
-                        # Trigger the item giving window for this Pokémon
-                        from ..singletons import get_pc_box
-                        pc = get_pc_box()
-                        if pc:
-                            pc.give_held_item({"individual_id": individual_id})
-                    else:
-                        # Lazy import: evo_window is a singleton built after this
-                        # module is first imported, so importing it at module top
-                        # would cycle.
-                        from ..singletons import evo_window
+                    # Lazy import: evo_window is a singleton built after this
+                    # module is first imported, so importing it at module top
+                    # would cycle.
+                    from ..singletons import evo_window
 
-                        # ask_pokemon_evo is modeless and returns immediately, so a
-                        # refresh here would run BEFORE the user confirms — a no-op.
-                        # The real refresh happens inside evolve_pokemon after
-                        # confirmation.
-                        evo_window.ask_pokemon_evo(individual_id, id, readiness["evo_id"])
+                    # ask_pokemon_evo is modeless and returns immediately, so a
+                    # refresh here would run BEFORE the user confirms — a no-op.
+                    # The real refresh happens inside evolve_pokemon after
+                    # confirmation.
+                    evo_window.ask_pokemon_evo(individual_id, id, readiness["evo_id"])
 
                 qconnect(evolve_now_button.clicked, evolve_now)
                 evolution_req_widget = evolve_now_button
@@ -474,6 +464,14 @@ def PokemonCollectionDetailsSplit(
                     evolution_note_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     evolution_note_label.setStyleSheet("color: #FF69B4;")
                     evolution_note_widget = evolution_note_label
+
+            if trigger_evo_callback is None and readiness.get("item_status_text"):
+                item_hint_widget = QLabel(readiness["item_status_text"])
+                item_hint_widget.setFont(custom_font)
+                item_hint_widget.setWordWrap(True)
+                item_hint_widget.setFixedWidth(230)
+                item_hint_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                item_hint_widget.setStyleSheet("color: #FF69B4;")
 
         if show_evolution_ui and not readiness["ready"] and readiness.get("status_text"):
             evolution_req_label = QLabel(readiness["status_text"])
@@ -516,6 +514,8 @@ def PokemonCollectionDetailsSplit(
             TopL_layout_Box.addWidget(evolution_req_widget)
         if evolution_note_widget is not None:
             TopL_layout_Box.addWidget(evolution_note_widget)
+        if item_hint_widget is not None:
+            TopL_layout_Box.addWidget(item_hint_widget)
 
         attacks_details_button = QPushButton("Attack Details")
         qconnect(attacks_details_button.clicked, lambda: attack_details_window(attacks))
@@ -646,6 +646,14 @@ def PokemonCollectionDetailsSplit(
                     lambda: trigger_evo_callback(readiness["method"]),
                 )
                 TopR_layout_Box.addWidget(evolve_now_button)
+                if readiness.get("item_status_text"):
+                    item_hint_label = QLabel(readiness["item_status_text"])
+                    item_hint_label.setFont(custom_font)
+                    item_hint_label.setWordWrap(True)
+                    item_hint_label.setFixedWidth(230)
+                    item_hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    item_hint_label.setStyleSheet("color: #FF69B4;")
+                    TopR_layout_Box.addWidget(item_hint_label)
             elif readiness.get("status_text"):
                 evolution_req_label = QLabel(readiness["status_text"])
                 evolution_req_label.setFont(custom_font)
