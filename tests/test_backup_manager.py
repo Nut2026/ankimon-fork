@@ -1325,9 +1325,15 @@ def test_no_profile_means_no_backup_operations(mock_env, monkeypatch):
     # get_backups: nothing to list, and no crash on None.iterdir().
     assert bm.get_backups() == []
 
-    # create_backup: refuse with a log line, write nothing.
+    before = {p.name for p in user_files_dir.iterdir()}
     assert bm.create_backup(required_file="ankimon.db") is False
-    assert not list(user_files_dir.iterdir())
+    after = {p.name for p in user_files_dir.iterdir()}
+    assert before == after
+    with patch.object(_bm_mod, "showWarning") as warning:
+        assert bm.create_backup(manual=True, required_file="ankimon.db") is False
+    assert warning.call_count == 1
+    assert "no active Anki profile folder" in warning.call_args.args[0]
+    assert {p.name for p in user_files_dir.iterdir()} == before
 
     # cleanup_backups and its helpers: no-op rather than AttributeError.
     bm.cleanup_backups()
