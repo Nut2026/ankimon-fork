@@ -65,7 +65,10 @@ class BackupManager:
                     BackupManager._move_backup_contents(item, target)
                     item.rmdir()
                 else:
-                    raise FileExistsError(f"Backup migration collision: {target}")
+                    renamed = target.with_name(
+                        f"{target.stem}__legacy_{uuid.uuid4().hex[:8]}{target.suffix}"
+                    )
+                    shutil.move(str(item), str(renamed))
             else:
                 shutil.move(str(item), str(target))
 
@@ -80,9 +83,10 @@ class BackupManager:
         legacy_path.rmdir()
 
     def refresh_profile_path(self) -> None:
+        self.backups_path = None
+
         profile_folder = self._active_profile_folder()
         if profile_folder is None:
-            self.backups_path = None
             return
 
         try:
@@ -90,8 +94,13 @@ class BackupManager:
         except Exception as error:
             self.logger.log("error", f"Failed to migrate legacy backups: {error}")
 
-        self.backups_path = profile_folder / "Ankimon_Backups"
-        self.backups_path.mkdir(parents=True, exist_ok=True)
+        candidate = profile_folder / "Ankimon_Backups"
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+        except Exception as error:
+            self.logger.log("error", f"Failed to create backup directory: {error}")
+            return
+        self.backups_path = candidate
 
     def _deobfuscate_data(self, obfuscated_str: str) -> Optional[Dict[str, Any]]:
         """De-obfuscates string back into a dictionary."""
@@ -180,6 +189,11 @@ class BackupManager:
         neither blanks another file's success nor is hidden by it."""
         if self.backups_path is None:
             self.logger.log("error", "Cannot create backup without an active profile path")
+            if manual:
+                showWarning(
+                    "Manual backup failed: no active Anki profile folder is "
+                    "available. Open a profile and try again."
+                )
             return False
 
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
