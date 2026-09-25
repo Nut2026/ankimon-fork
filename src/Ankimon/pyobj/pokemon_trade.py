@@ -103,6 +103,10 @@ def _build_sprite_box(container_size, sprite_size, challenge_pokemon, show_sprit
             if os.path.exists(sprite_path):
                 movie = QMovie(sprite_path)
                 movie.setParent(sprite_label)  # Keep movie alive with the label
+                if movie.jumpToFrame(0):
+                    movie.setScaledSize(movie.currentPixmap().size().scaled(
+                        sprite_label.size(), Qt.AspectRatioMode.KeepAspectRatio
+                    ))
                 sprite_label.setMovie(movie)
                 movie.start()
         except Exception:
