@@ -179,7 +179,9 @@ Support my Caffeine Addiction (something that helps building this Addon):
    **Important:** You need to download: „Data Files, Sprite Files and Badges and Item Sprites“!
 
 2. **Catch Pokémon:** As you review your Anki cards, encounter and catch Pokémon to add to your collection.
+   Use an escape item from the Bag to leave a battle and encounter a new Pokémon. A successful escape uses one item; if the encounter cannot be replaced, Ankimon reports whether the item was returned to your Bag.
 3. **Training:** Train your Pokémon using various methods to strengthen them for battles.
+   In Pokémon details, a ready level evolution has an Evolve button even when an item evolution is also available; item requirements appear as hints. Use evolution items from the Bag, not the Pokémon details screen. If the same item can evolve a Pokémon into both a regional and a standard form, the active region's form takes priority; otherwise the standard form is chosen. Regional item evolutions with no standard alternative for that item remain available in any region.
 4. **Battles:** Challenge other users on Pokémon Showdown to battles using your trained Pokémon.
 5. **Bug Reporting:** If you encounter any issues or bugs, please report them on the [GitHub Issues Page](https://github.com/Unlucky-Life/ankimon/issues). Your feedback helps improve the addon for everyone.
 
