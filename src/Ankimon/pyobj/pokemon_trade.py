@@ -18,6 +18,73 @@ from ..services import services
 import os
 
 
+_MONTHLY_CHALLENGE_GENERATION = 0
+
+
+def bump_monthly_session_generation():
+    """Invalidate any in-flight monthly-challenge worker callbacks.
+
+    Call this whenever the active account/profile changes (e.g. from
+    `switch_database()`) or the profile is about to close, so that any
+    monthly-challenge callback already queued on the GUI thread will be
+    discarded before it can show UI or persist state.
+    """
+    global _MONTHLY_CHALLENGE_GENERATION
+    _MONTHLY_CHALLENGE_GENERATION += 1
+
+
+def _capture_monthly_session():
+    """Snapshot the active account/profile identity for a scheduled worker.
+
+    Returns a token that can be compared against `_is_monthly_session_current`
+    before any UI is shown or any state is persisted. Returns ``None`` when
+    there is no live collection to bind to.
+    """
+    col = getattr(mw, "col", None)
+    if col is None:
+        return None
+    try:
+        col_path = getattr(col, "path", None)
+    except Exception:
+        col_path = None
+    try:
+        profile_name = mw.pm.name
+    except Exception:
+        profile_name = None
+    return {
+        "col_path": col_path,
+        "profile_name": profile_name,
+        "generation": _MONTHLY_CHALLENGE_GENERATION,
+    }
+
+
+def _is_monthly_session_current(token):
+    """Return True when the captured session still matches the live one.
+
+    Verifies (a) a collection is still open, (b) the collection path matches,
+    (c) the profile name matches, and (d) the generation counter has not been
+    bumped since the token was captured.
+    """
+    if token is None:
+        return False
+    col = getattr(mw, "col", None)
+    if col is None:
+        return False
+    try:
+        if getattr(col, "path", None) != token["col_path"]:
+            return False
+    except Exception:
+        return False
+    try:
+        if mw.pm.name != token["profile_name"]:
+            return False
+    except Exception:
+        return False
+    if token["generation"] != _MONTHLY_CHALLENGE_GENERATION:
+        return False
+    return True
+
+
 class MonthlyChallengeDialog(QDialog):
     """Dialog that ignores Escape key to prevent accidental rejection."""
     def keyPressEvent(self, event):
@@ -688,6 +755,16 @@ def check_and_award_monthly_pokemon(logger, defer=True):
           JSON cannot be fetched (handles offline scenarios gracefully)
         - All exceptions are caught, logged, and swallowed to prevent
           interrupting the user's Anki session
+        - The deferred path captures an account/profile session token when the
+          worker is scheduled and re-validates it before showing UI, again
+          after the modal returns, and once more before persisting any state.
+          This prevents a callback that was scheduled on account A from
+          awarding the Pokémon to account B (or to a torn-down profile) when
+          the user switches accounts or closes the profile while the HTTP
+          fetch is in flight. Because switch_database() mutates the same
+          services.db object in place, the token is keyed off mw.col.path,
+          mw.pm.name, and a monotonic generation counter rather than the DB
+          object's identity.
     """
 
     def _fetch_monthly_data():
@@ -815,18 +892,70 @@ def check_and_award_monthly_pokemon(logger, defer=True):
             logger.log("error", f"An unexpected error occurred while fetching monthly data: {e}")
             return None
 
-    def _process_on_main_thread(result_data):
-        """Process the monthly challenge award on the main thread."""
+    def _process_on_main_thread(result_data, session_token):
+        """Process the monthly challenge award on the main thread.
+
+        ``session_token`` was captured when the worker was scheduled. Any
+        callback whose originating account/profile is no longer current is
+        discarded before it can show UI or persist state.
+        """
         if result_data is None:
             return
-        
+
+        # Discard stale callbacks: the account/profile may have changed or been
+        # closed while the background fetch was in flight.
+        if not _is_monthly_session_current(session_token):
+            logger.log("info", "Discarding stale monthly challenge result: originating session is no longer active.")
+            return
+
         new_pokemon = result_data["new_pokemon"]
         description = result_data["description"]
-        challenge_pokemon_data = result_data["challenge_pokemon_data"]
-        
+
         accepted = show_monthly_challenge_dialog(new_pokemon, description, parent_window=mw)
+
+        if not _is_monthly_session_current(session_token):
+            logger.log("info", "Discarding stale monthly challenge decision: session changed while dialog was open.")
+            return
+
+        db = services.db
+
+        try:
+            if db.get_user_data("rate_this") not in (True, "true"):
+                logger.log("info", "Discarding monthly challenge decision: user has not rated the addon on the current account.")
+                return
+
+            current_status = db.get_user_data("monthly_challenge", 0)
+            try:
+                current_status = int(current_status)
+            except (TypeError, ValueError):
+                current_status = 0
+            current_id = db.get_user_data("monthly_challenge_id")
+
+            if current_id is None or str(current_id) != str(new_pokemon["individual_id"]):
+                logger.log("info", "Discarding monthly challenge decision: tracking id changed while dialog was open.")
+                return
+
+            if db.get_pokemon(new_pokemon["individual_id"]) is not None:
+                db.set_monthly_challenge_state(new_pokemon["individual_id"], 1)
+                logger.log("info", "Monthly challenge Pokémon already present in collection; tracking state reconciled.")
+                return
+
+            if current_status == 2:
+                logger.log("info", "Discarding monthly challenge decision: challenge was already rejected.")
+                return
+
+            if accepted and current_status == 1:
+                logger.log("info", "Discarding monthly challenge acceptance: challenge was already accepted.")
+                return
+
+            if not accepted and current_status == 1:
+                logger.log("info", "Discarding monthly challenge rejection: challenge was already accepted.")
+                return
+        except Exception as e:
+            logger.log("error", f"Error rechecking monthly challenge state before saving: {e}")
+            return
+
         if accepted:
-            db = services.db
             success = add_pokemon_to_collection(new_pokemon, parent_window=mw)
             if success:
                 db.set_monthly_challenge_state(new_pokemon["individual_id"], 1)
@@ -837,27 +966,28 @@ def check_and_award_monthly_pokemon(logger, defer=True):
                 db.set_monthly_challenge_state(new_pokemon["individual_id"], 0)
                 logger.log("error", f"Failed to add {new_pokemon['name']} to collection. Status rolled back.")
         else:
-            db = services.db
             db.set_monthly_challenge_state(new_pokemon["individual_id"], 2)
             show_monthly_rejection_dialog(parent_window=mw, challenge_pokemon=new_pokemon)
             shiny_text = " (Shiny)" if new_pokemon["shiny"] else ""
             logger.log("info", f"User rejected {new_pokemon['name']}{shiny_text}.")
 
-    # Let Anki own the worker and invoke the completion callback on the GUI thread.
     if defer:
+        session_token = _capture_monthly_session()
+
         def on_done(future):
             """Handle the task-manager result on Anki's GUI thread."""
             try:
-                _process_on_main_thread(future.result())
+                _process_on_main_thread(future.result(), session_token)
             except Exception as e:
                 logger.log("error", f"Error completing monthly check: {e}")
 
         mw.taskman.run_in_background(_fetch_monthly_data, on_done)
     else:
         # Non-deferred: run everything on the main thread (for tests)
+        session_token = _capture_monthly_session()
         result = _fetch_monthly_data()
         if result is not None:
-            _process_on_main_thread(result)
+            _process_on_main_thread(result, session_token)
 
 def parse_to_canonical(code_str):
     if not code_str:
