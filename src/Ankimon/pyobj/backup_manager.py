@@ -57,13 +57,40 @@ class BackupManager:
             return None
 
     @staticmethod
+    def _is_link(path: Path) -> bool:
+        from ..save_import import _is_link
+
+        return _is_link(path)
+
+    @staticmethod
     def _move_backup_contents(source: Path, destination: Path) -> None:
+        """Move every entry from ``source`` into ``destination``.
+
+        Keeps the source recoverable: entries are removed only after they have
+        been moved. A collision at the top level (a same-named backup directory
+        already present in the destination) is resolved by renaming the
+        colliding backup directory as a whole -- never its constituent files --
+        so the inner ``ankimon.db`` / ``ankimonDEV.db`` names stay intact and
+        ``get_backups()`` still lists and restores the legacy snapshot.
+
+        Directory links (symlinks, junctions) are never followed: recursing
+        through one would move files from outside the backups folder, and the
+        subsequent ``rmdir()`` would fail on the link itself. A link is moved
+        as a link.
+        """
         for item in source.iterdir():
+            if BackupManager._is_link(item):
+                target = destination / item.name
+                if target.exists() or target.is_symlink():
+                    target = BackupManager._legacy_collision_name(target)
+                shutil.move(str(item), str(target))
+                continue
+
             target = destination / item.name
             if target.exists():
                 if item.is_dir() and target.is_dir():
-                    BackupManager._move_backup_contents(item, target)
-                    item.rmdir()
+                    renamed = BackupManager._legacy_collision_name(target)
+                    shutil.move(str(item), str(renamed))
                 else:
                     renamed = target.with_name(
                         f"{target.stem}__legacy_{uuid.uuid4().hex[:8]}{target.suffix}"
@@ -72,10 +99,27 @@ class BackupManager:
             else:
                 shutil.move(str(item), str(target))
 
+    @staticmethod
+    def _legacy_collision_name(target: Path) -> Path:
+        """A sibling name for a legacy entry that collided with ``target``.
+
+        For a ``backup_*`` directory the rename stays inside the ``backup_``
+        namespace, so ``get_backups()`` still finds the legacy snapshot and its
+        inner ``ankimon.db`` keeps the name the listing and restore paths
+        expect. Other collisions simply gain the legacy suffix.
+        """
+        return target.with_name(f"{target.name}__legacy_{uuid.uuid4().hex[:8]}")
+
     def _migrate_legacy_backups(self, profile_folder: Path) -> None:
         legacy_path = self.addon_path.parent / "ankimon_backups"
         new_path = profile_folder / "Ankimon_Backups"
         if not legacy_path.exists() or legacy_path == new_path:
+            return
+        if self._is_link(legacy_path):
+            self.logger.log(
+                "error",
+                f"Refusing to migrate linked legacy backups directory: {legacy_path}",
+            )
             return
 
         new_path.mkdir(parents=True, exist_ok=True)
@@ -730,15 +774,6 @@ class BackupManager:
     def _discard_name(self, directory: Path) -> Path:
         return directory.with_name(
             f"{self.DISCARD_PREFIX}{uuid.uuid4().hex[:8]}_{directory.name.lstrip('.')}")
-
-    @staticmethod
-    def _is_link(path: Path) -> bool:
-        # A Windows junction is not a symlink to pathlib, and walking one deletes
-        # what it points at. The import code's check reads the reparse tag on
-        # every Python; os.path.isjunction only exists from 3.12.
-        from ..save_import import _is_link
-
-        return _is_link(path)
 
     def _remove_tree(self, directory: Path, deadline) -> bool:
         """Delete a directory one entry at a time, stopping at the deadline.
