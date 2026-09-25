@@ -103,7 +103,7 @@ def mock_env(tmp_path):
     # a real per-test folder: without it, Path(MagicMock(...)) stringifies to a
     # junk path shared by every manager in the session, so backups created by
     # other tests appear in this one's listing (and vice versa).
-    profile_folder = tmp_path / "profile"
+    profile_folder = tmp_path / "anki-profile"
     profile_folder.mkdir(parents=True, exist_ok=True)
 
     # Mock resources within database_manager and backup_manager namespaces.
