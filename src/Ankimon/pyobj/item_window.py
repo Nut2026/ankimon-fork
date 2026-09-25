@@ -714,7 +714,19 @@ class ItemWindow(QWidget):
                     self.logger.log(
                         "error", f"Could not return {item_name} after escape failed: {refund_exc}"
                     )
+                    message = (
+                        f"Could not escape. Your {item_name} could not be returned "
+                        "to your bag. Please report this problem before using "
+                        "another escape item."
+                    )
+                else:
+                    message = (
+                        f"Could not escape. Your {item_name} was returned to your bag. "
+                        "Please try again."
+                    )
                 self.logger.log("error", f"Could not escape with {item_name}: {exc}")
+                self._refresh_bag()
+                services.ui.warn(message)
                 return False
             else:
                 self.logger.log(

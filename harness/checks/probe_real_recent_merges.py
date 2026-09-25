@@ -4,6 +4,7 @@ Run: QT_QPA_PLATFORM=offscreen python -m harness.checks.probe_real_recent_merges
 Set ANKIMON_PROOF_SCREENSHOTS to retain PNGs of the evolution details and bag.
 """
 
+from contextlib import nullcontext
 import os
 from pathlib import Path
 import random
@@ -26,6 +27,7 @@ def run_proof():
     from PyQt6.QtTest import QTest
     from PyQt6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
     from Ankimon.functions import encounter_functions
+    from Ankimon import gui_presenter
     from Ankimon.gui_classes.pokemon_details import PokemonCollectionDetailsSplit
     from Ankimon.singletons import get_item_window, get_evo_window
     from harness.fixtures import build_pokemon
@@ -92,6 +94,51 @@ def run_proof():
     screenshot(bag, "escape-bag")
     bag.close()
 
+    # Native signals ignore the handler's return value. Both refund outcomes
+    # must reach the production presenter's warning leaf with a useful message.
+    for refund_fails in (False, True):
+        db.save_item(63, "poke-doll", 3)
+        bag.renewWidgets()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        bag.show()
+        driver.env.app.processEvents()
+        button = next(
+            button
+            for button in bag.findChildren(QPushButton)
+            if button.text() == "Escape from battle" and button.isVisible()
+        )
+        token = enemy._ankimon_encounter_token
+        refund_error = (
+            patch.object(
+                db, "refund_item", side_effect=OSError("private refund details")
+            )
+            if refund_fails
+            else nullcontext()
+        )
+        with (
+            refund_error,
+            patch.object(
+                encounter_functions,
+                "generate_random_pokemon",
+                side_effect=RuntimeError("private generation details"),
+            ),
+            patch.object(gui_presenter, "showWarning") as warning,
+        ):
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        warning.assert_called_once()
+        message = warning.call_args.args[0]
+        assert "private" not in message
+        if refund_fails:
+            assert (
+                "could not be returned" in message and "report this problem" in message
+            )
+        else:
+            assert "was returned" in message and "try again" in message
+        assert db.get_item("poke-doll")["quantity"] == (2 if refund_fails else 3)
+        assert enemy._ankimon_encounter_token is token
+        assert len(db.get_mobile_history()) == 2
+        bag.close()
+
     for species, level, gender, target, item_target in (
         (281, 30, "M", 282, "Gallade"),
         (361, 42, "F", 362, "Froslass"),
@@ -155,7 +202,7 @@ def run_proof():
         screenshot(window, f"evolution-{species}")
         window.close()
     print(
-        "probe_real_recent_merges: OK (SQLite refunds, post-replacement failure, native escape, evolution buttons)"
+        "probe_real_recent_merges: OK (SQLite refunds, post-replacement failure, native escape and failure messages, evolution buttons)"
     )
     return True
 

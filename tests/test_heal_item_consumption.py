@@ -209,6 +209,7 @@ def _escape_window(mod, db, monkeypatch, encounter):
     win.enemy_pokemon = enemy
     win.escape_items = {"poke-doll": True}
     win.settings_obj.get.return_value = True
+    mod.services.ui = MagicMock()
     encounter_mod = types.ModuleType("Ankimon.functions.encounter_functions")
     encounter_mod.new_pokemon = encounter
     singletons_mod = types.ModuleType("Ankimon.singletons")
@@ -554,6 +555,43 @@ def test_failed_escape_preserves_real_inventory(item_window_mod, real_db, monkey
     assert real_db.get_item("poke-doll") == before
     assert enemy.name == "Pikachu"
     assert real_db.get_mobile_history() == []
+
+
+@pytest.mark.parametrize("refund_fails", [False, True])
+def test_native_escape_failure_reports_refund_without_exception_details(
+    item_window_mod, real_db, monkeypatch, refund_fails
+):
+    """The direct native handler tells the player what happened to their item."""
+    real_db.save_item(63, "poke-doll", 3)
+
+    def fail(*_args, **_kwargs):
+        """Supply internal details that belong only in the diagnostic log."""
+        raise RuntimeError("Cannot open /private/profile/encounter.json")
+
+    win, _enemy = _escape_window(item_window_mod, real_db, monkeypatch, fail)
+    if refund_fails:
+        monkeypatch.setattr(
+            real_db, "refund_item",
+            MagicMock(side_effect=OSError("Cannot write /private/profile/ankimon.db")),
+        )
+    assert win.Handle_EscapeItem("poke-doll") is False
+    item_window_mod.services.ui.warn.assert_called_once()
+    message = item_window_mod.services.ui.warn.call_args.args[0]
+    assert "Could not escape" in message
+    assert "poke-doll" in message
+    assert "/private" not in message
+    assert "Cannot open" not in message and "Cannot write" not in message
+    if refund_fails:
+        assert "could not be returned" in message
+        assert "report this problem" in message
+        assert real_db.get_item("poke-doll")["quantity"] == 2
+    else:
+        assert "was returned" in message
+        assert "try again" in message
+        assert real_db.get_item("poke-doll")["quantity"] == 3
+    win.renewWidgets.assert_called_once()
+    assert real_db.get_mobile_history() == []
+    assert any("/private/profile/encounter.json" in str(call) for call in win.logger.log.call_args_list)
 
 
 @pytest.mark.parametrize("quantity", [1, 3])
