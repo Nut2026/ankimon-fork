@@ -691,7 +691,9 @@ class ItemWindow(QWidget):
             "cash_gained": 0,
         }
 
-        if not self._consume_one(item_name):
+        item = services.db.get_item(item_name)
+        token_before = getattr(enemy, "_ankimon_encounter_token", None)
+        if not item or not self._consume_one(item_name):
             return False
         try:
             new_pokemon(
@@ -702,14 +704,22 @@ class ItemWindow(QWidget):
                 update_hud=True,
             )
         except Exception as exc:
-            try:
-                services.db.add_item(item_name, 1)
-            except Exception as refund_exc:
+            # new_pokemon sets a fresh token once the enemy's stats and HP
+            # have been replaced. Later scene/HUD errors must not grant a free
+            # reroll or report that a completed escape failed.
+            if getattr(enemy, "_ankimon_encounter_token", None) is token_before:
+                try:
+                    services.db.refund_item(item)
+                except Exception as refund_exc:
+                    self.logger.log(
+                        "error", f"Could not return {item_name} after escape failed: {refund_exc}"
+                    )
+                self.logger.log("error", f"Could not escape with {item_name}: {exc}")
+                return False
+            else:
                 self.logger.log(
-                    "error", f"Could not return {item_name} after escape failed: {refund_exc}"
+                    "warning", f"Escape with {item_name} succeeded with display errors: {exc}"
                 )
-            self.logger.log("error", f"Could not escape with {item_name}: {exc}")
-            return False
 
         try:
             self._refresh_bag()

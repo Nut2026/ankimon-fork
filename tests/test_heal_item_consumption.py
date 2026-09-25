@@ -90,6 +90,13 @@ class _FakeItemDB:
         return new
 
     def add_item(self, item_name, count):
+        """Match the real upsert: the supplied count replaces existing stock."""
+        self.quantity_calls.append((item_name, count))
+        self.inventory[item_name] = count
+
+    def refund_item(self, item, count=1):
+        """Mirror the refund increment; SQLite coverage below checks metadata."""
+        item_name = item["item_name"]
         self.quantity_calls.append((item_name, count))
         self.inventory[item_name] = self.inventory.get(item_name, 0) + count
 
@@ -243,8 +250,10 @@ def test_escape_refuses_empty_bag_without_replacing_encounter(
     assert db.history == []
 
 
-def test_failed_escape_refunds_item_and_reports_failure(item_window_mod, monkeypatch):
-    db = _FakeItemDB({"poke-doll": 1})
+@pytest.mark.parametrize("quantity", [1, 3])
+def test_failed_escape_refunds_item_and_reports_failure(item_window_mod, monkeypatch, quantity):
+    """A failed replacement returns the spent unit for empty and surviving rows."""
+    db = _FakeItemDB({"poke-doll": quantity})
 
     def broken_encounter(*_args, **_kwargs):
         raise RuntimeError("encounter failed")
@@ -252,7 +261,7 @@ def test_failed_escape_refunds_item_and_reports_failure(item_window_mod, monkeyp
     win, _enemy = _escape_window(item_window_mod, db, monkeypatch, broken_encounter)
 
     assert win.dispatch_use("poke-doll")["ok"] is False
-    assert db.inventory["poke-doll"] == 1
+    assert db.inventory["poke-doll"] == quantity
     assert db.history == []
 
 
@@ -527,3 +536,81 @@ def test_the_heal_path_spends_one_real_row_per_heal(item_window_mod, real_db):
 
     assert win.Check_Heal_Item("mewtwo", 20, "potion", {}) is False
     assert pokemon.hp == 50, "the third click healed out of an empty bag"
+
+
+@pytest.mark.parametrize("quantity", [1, 3])
+def test_failed_escape_preserves_real_inventory(item_window_mod, real_db, monkeypatch, quantity):
+    """A failed escape preserves the entire SQLite row, including custom metadata."""
+    real_db.save_item(63, "poke-doll", quantity, {"source": "reward"},
+                      category_id=10, cost=1000, fling_power=30, fling_effect_id=1)
+    before = real_db.get_item("poke-doll")
+
+    def fail(*_args, **_kwargs):
+        """Fail before the enemy is replaced."""
+        raise RuntimeError("encounter generation failed")
+
+    win, enemy = _escape_window(item_window_mod, real_db, monkeypatch, fail)
+    assert win.dispatch_use("poke-doll")["ok"] is False
+    assert real_db.get_item("poke-doll") == before
+    assert enemy.name == "Pikachu"
+    assert real_db.get_mobile_history() == []
+
+
+@pytest.mark.parametrize("quantity", [1, 3])
+@pytest.mark.parametrize("fail_after_replacement", [False, True])
+def test_escape_replacement_keeps_payment_and_history(
+    item_window_mod, real_db, monkeypatch, quantity, fail_after_replacement
+):
+    """A new encounter costs one item, including when its subsequent rendering fails."""
+    real_db.save_item(63, "poke-doll", quantity)
+
+    def replace(enemy, *_args, **_kwargs):
+        """Commit a new encounter, then optionally fail its presentation."""
+        enemy.name = "Rattata"
+        enemy._ankimon_encounter_token = object()
+        if fail_after_replacement:
+            raise RuntimeError("battle scene unavailable")
+
+    win, enemy = _escape_window(item_window_mod, real_db, monkeypatch, replace)
+    enemy._ankimon_encounter_token = object()
+    assert win.dispatch_use("poke-doll")["ok"] is True
+    assert (real_db.get_item("poke-doll") or {}).get("quantity", 0) == quantity - 1
+    assert enemy.name == "Rattata"
+    history = real_db.get_mobile_history()
+    assert len(history) == 1
+    assert history[0]["enemy_name"] == "Pikachu"
+    assert history[0]["outcome"] == "escaped"
+
+
+@pytest.mark.parametrize("quantity", [1, 3])
+def test_refund_preserves_intervening_inventory_changes(real_db, quantity):
+    """Refund the spent unit without undoing a later writer's inventory update."""
+    real_db.save_item(63, "poke-doll", quantity)
+    before = real_db.get_item("poke-doll")
+    assert real_db.consume_item("poke-doll")
+    real_db.save_item(63, "poke-doll", 7, {"source": "new reward"})
+    real_db.refund_item(before)
+    assert real_db.get_item("poke-doll")["quantity"] == 8
+    assert real_db.get_item("poke-doll")["extra_data"] == {"source": "new reward"}
+
+
+@pytest.mark.parametrize("quantity", [1, 3])
+def test_refund_commit_failure_leaves_no_pending_credit(real_db, monkeypatch, quantity):
+    """An unsuccessful refund cannot leak into a later unrelated commit."""
+    import sqlite3
+
+    real_db.save_item(63, "poke-doll", quantity)
+    before = real_db.get_item("poke-doll")
+    assert real_db.consume_item("poke-doll")
+    conn = real_db._get_connection()
+
+    def fail_commit():
+        """Simulate a failed commit after refund SQL has executed."""
+        raise sqlite3.OperationalError("injected refund commit failure")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(conn, "commit", fail_commit)
+        with pytest.raises(sqlite3.OperationalError, match="refund commit failure"):
+            real_db.refund_item(before)
+    real_db.save_item(17, "potion", 1)
+    assert (real_db.get_item("poke-doll") or {}).get("quantity", 0) == quantity - 1

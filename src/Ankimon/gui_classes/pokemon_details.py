@@ -430,11 +430,13 @@ def PokemonCollectionDetailsSplit(
                 evo_name = readiness["evo_name"] or "the next form"
                 evolve_now_button = QPushButton(f"✨ Evolve into {evo_name} now")
                 evolve_now_button.setFont(custom_font)
-                evolve_now_button.setFixedWidth(230)
                 evolve_now_button.setStyleSheet(
                     "QPushButton { background-color: #FF69B4; color: white;"
                     " border-radius: 6px; padding: 5px; font-weight: bold; }"
                     " QPushButton:hover { background-color: #FF8DC7; }"
+                )
+                evolve_now_button.setMinimumWidth(
+                    max(230, evolve_now_button.sizeHint().width())
                 )
 
                 def evolve_now():

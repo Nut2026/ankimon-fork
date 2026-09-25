@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -14,13 +15,52 @@ from harness.driver import Driver
 
 
 def run_probe():
+    """Exercise the merged regressions against the real headless core."""
     driver = Driver(first_encounter=False)
 
     # Encounter tier labels are strings; enabling the rare encounter popup must
     # not turn an ordinary encounter into a TypeError.
     driver.set_setting("gui.pop_up_dialog_message_on_encounter", True)
-    driver.encounter()
-    assert not [event for event in driver.drain_events() if event["type"] == "error"]
+    events = driver.encounter()
+    assert any(event["type"] == "encounter" for event in events), events
+    assert not [event for event in events if event["type"] == "error"], events
+
+    # Force every tier and a shiny ordinary encounter so RNG cannot bypass the
+    # comparison or leave the notification side of the regression untested.
+    from Ankimon.functions import encounter_functions
+
+    generated = list(
+        encounter_functions.generate_random_pokemon(
+            driver.services.main_pokemon.level, driver.services.tracker
+        )
+    )
+    for tier, shiny, popup in (
+        ("Normal", False, False),
+        ("Baby", False, False),
+        ("Starter", False, True),
+        ("Ultra", False, True),
+        ("Gmax", False, True),
+        ("Legendary", False, True),
+        ("Mega", False, True),
+        ("Mythical", False, True),
+        ("Normal", True, True),
+    ):
+        generated[14], generated[16] = tier, shiny
+        with patch.object(
+            encounter_functions,
+            "generate_random_pokemon",
+            return_value=tuple(generated),
+        ):
+            with patch.object(
+                driver.services.logger, "log_and_showinfo"
+            ) as notification:
+                events = driver.encounter()
+        assert not [event for event in events if event["type"] == "error"], events
+        assert notification.call_count == int(popup), (
+            tier,
+            shiny,
+            notification.call_args_list,
+        )
 
     from Ankimon.functions.friendship_evolution import evolution_readiness
     from Ankimon.functions.pokedex_functions import check_evolution_by_item
@@ -29,11 +69,11 @@ def run_probe():
         (281, 30, "M", 282),
         (361, 42, "F", 362),
     ):
-        result = evolution_readiness(
-            {"id": species, "level": level, "gender": gender}
-        )
+        result = evolution_readiness({"id": species, "level": level, "gender": gender})
         assert (result["method"], result["evo_id"], result["ready"]) == (
-            "level", expected, True
+            "level",
+            expected,
+            True,
         )
         assert result["item_status_text"]
 
