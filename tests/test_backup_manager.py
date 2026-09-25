@@ -1339,3 +1339,112 @@ def test_no_profile_means_no_backup_operations(mock_env, monkeypatch):
     bm.cleanup_backups()
     assert bm._discarded() == []
     bm._sweep_leftovers()
+
+
+def test_migration_collision_keeps_both_backups_listable(mock_env):
+    """A same-named backup directory in both locations must stay listable.
+
+    Renaming files inside the destination backup (the previous approach) hides
+    the legacy snapshot from get_backups(), which looks for ``ankimon.db`` by
+    name. Renaming the colliding backup directory as a whole keeps both
+    ``backup_*`` folders visible, and each keeps an ``ankimon.db``.
+    """
+    bm, _, _, addon_dir = mock_env
+    legacy_root = addon_dir.parent / "ankimon_backups"
+    legacy_root.mkdir()
+    legacy_name = "backup_2026-09-25_10-00-00"
+    legacy_backup = legacy_root / legacy_name
+    legacy_backup.mkdir()
+    _seed_db(legacy_backup / "ankimon.db", "Legacy", 111)
+    (legacy_backup / "summary.json").write_text(json.dumps({
+        "date": "2026-09-25 10-00-00",
+        "normal_stats": {"trainer_name": "Legacy", "trainer_cash": 111},
+    }), encoding="utf-8")
+
+    # The destination already holds a same-named backup with a different save.
+    existing = bm.backups_path / legacy_name
+    existing.mkdir()
+    _seed_db(existing / "ankimon.db", "Existing", 999)
+
+    bm._migrate_legacy_backups(bm.backups_path.parent)
+
+    # The legacy snapshot still exists as a listable ``backup_*`` directory,
+    # under a distinct name, with its inner ``ankimon.db`` intact.
+    legacy_copies = [
+        p for p in bm.backups_path.iterdir()
+        if p.name.startswith(legacy_name) and (p / "ankimon.db").is_file()
+    ]
+    assert {p.name for p in legacy_copies} == {
+        legacy_name, f"{legacy_name}__legacy_{legacy_copies[1].name.rsplit('_', 1)[-1]}",
+    } or len(legacy_copies) == 2, "both backups must survive the collision"
+    assert legacy_root.exists() is False or not list(legacy_root.iterdir())
+
+    # get_backups() must see both the existing backup and the migrated legacy
+    # snapshot, since each still contains an ``ankimon.db`` for the active mode.
+    names = {Path(bk["path"]).name for bk in bm.get_backups()}
+    assert existing.name in names
+    migrated = next(p for p in legacy_copies if p.name != existing.name)
+    assert migrated.name in names
+    # The migrated snapshot kept its original ``ankimon.db`` filename, which is
+    # what the listing and restore paths expect.
+    assert (migrated / "ankimon.db").is_file()
+    assert not list(bm.backups_path.glob("ankimon__legacy_*.db"))
+
+
+def test_migration_collision_seeds_legacy_name_inside_backup_namespace(mock_env):
+    """The renamed legacy directory must still match the ``backup_`` listing filter."""
+    bm, _, _, addon_dir = mock_env
+    legacy_root = addon_dir.parent / "ankimon_backups"
+    legacy_root.mkdir()
+    name = "backup_2026-09-25_11-00-00"
+    (legacy_root / name).mkdir()
+    _seed_db(legacy_root / name / "ankimon.db", "Legacy", 1)
+    (bm.backups_path / name).mkdir()
+    _seed_db(bm.backups_path / name / "ankimon.db", "Existing", 2)
+
+    bm._migrate_legacy_backups(bm.backups_path.parent)
+
+    assert len(list(bm.backups_path.glob("backup_*"))) == 2
+    assert bm._legacy_collision_name(bm.backups_path / name).name.startswith("backup_")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs privileges on Windows")
+def test_migration_does_not_follow_a_linked_legacy_root(mock_env, tmp_path):
+    """A linked legacy_path is not a migration source: walking it moves external files."""
+    bm, _, _, addon_dir = mock_env
+    external = tmp_path / "external-backups"
+    external.mkdir()
+    (external / "backup_2026-09-25_12-00-00").mkdir()
+    (external / "backup_2026-09-25_12-00-00" / "ankimon.db").write_bytes(b"external")
+    legacy_root = addon_dir.parent / "ankimon_backups"
+    legacy_root.symlink_to(external, target_is_directory=True)
+
+    bm._migrate_legacy_backups(bm.backups_path.parent)
+
+    # The external folder is untouched, and nothing was copied into the profile.
+    assert (external / "backup_2026-09-25_12-00-00" / "ankimon.db").read_bytes() == b"external"
+    assert list(bm.backups_path.iterdir()) == []
+    # The link itself remains, so the user can decide what to do with it.
+    assert legacy_root.is_symlink()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs privileges on Windows")
+def test_migration_moves_a_linked_entry_without_following_it(mock_env, tmp_path):
+    """A link inside the legacy root moves as a link; its target is not walked."""
+    bm, _, _, addon_dir = mock_env
+    external = tmp_path / "external-backups"
+    external.mkdir()
+    (external / "ankimon.db").write_bytes(b"external")
+    legacy_root = addon_dir.parent / "ankimon_backups"
+    legacy_root.mkdir()
+    (legacy_root / "linked-entry").symlink_to(external, target_is_directory=True)
+    (legacy_root / "backup_2026-09-25_13-00-00").mkdir()
+    (legacy_root / "backup_2026-09-25_13-00-00" / "ankimon.db").write_bytes(b"legacy")
+
+    bm._migrate_legacy_backups(bm.backups_path.parent)
+
+    # The external folder is untouched: the link was moved, not walked.
+    assert (external / "ankimon.db").read_bytes() == b"external"
+    assert (bm.backups_path / "linked-entry").is_symlink()
+    assert (bm.backups_path / "backup_2026-09-25_13-00-00" / "ankimon.db").read_bytes() == b"legacy"
+    assert not legacy_root.exists()
