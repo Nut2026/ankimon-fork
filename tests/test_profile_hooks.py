@@ -69,6 +69,7 @@ def _exec_profile_hooks(monkeypatch, gui_hooks):
     clear_encounter = MagicMock(name="clear_encounter_cache")
     clear_auto_battle = MagicMock(name="clear_auto_battle_override")
     warm_evolution = MagicMock(name="warm_evolution_caches", return_value=507)
+    clear_utils = MagicMock(name="clear_utils_caches")
 
     monkeypatch.setitem(
         sys.modules,
@@ -92,7 +93,11 @@ def _exec_profile_hooks(monkeypatch, gui_hooks):
     monkeypatch.setitem(
         sys.modules,
         "Ankimon.utils",
-        _stub_module("Ankimon.utils", test_online_connectivity=lambda: False),
+        _stub_module(
+            "Ankimon.utils",
+            test_online_connectivity=lambda: False,
+            clear_utils_caches=clear_utils,
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -100,8 +105,14 @@ def _exec_profile_hooks(monkeypatch, gui_hooks):
         _stub_module(
             "Ankimon.pyobj.ankimon_sync",
             setup_ankimon_sync_hooks=MagicMock(),
-            check_and_sync_pokemon_data=MagicMock(),
         ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "Ankimon.pyobj.save_transfer",
+        _stub_module("Ankimon.pyobj.save_transfer",
+                     register_media_migration_hooks=MagicMock(),
+                     guard_media_saves_now=MagicMock()),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -160,6 +171,7 @@ def _exec_profile_hooks(monkeypatch, gui_hooks):
         clear_learnset,
         clear_encounter,
         clear_auto_battle,
+        clear_utils,
     )
     profile_hooks._warm = warm_evolution
     return profile_hooks
@@ -241,10 +253,13 @@ def test_cache_clear_hook_idempotent_on_module_reexec(monkeypatch):
 
 
 # --- Mobile-review sync wiring (decoupling fix) ------------------------------
-# The profile_did_open handler must register the AnkiWeb sync hooks
-# SYNCHRONOUSLY and independent of the legacy misc.ankiweb_sync file-sync
-# toggle, so mobile-review detection is live for a default-config user. The
-# file-based data-sync DIALOG, by contrast, stays gated behind that toggle.
+# The profile_did_open handler must register the post-sync hook SYNCHRONOUSLY
+# and UNCONDITIONALLY, so mobile-review detection is live for every user. It was
+# once gated behind the misc.ankiweb_sync file-sync toggle (default False),
+# which meant a mid-session sync never turned phone reviews into battles (#586).
+# That toggle, and the file-sync it gated, have since been removed entirely —
+# so these tests now assert registration under the SHIPPED configuration, with
+# no toggle available to mask a re-gating regression.
 
 
 class _Future:
@@ -255,20 +270,33 @@ class _Future:
         return self._value
 
 
-def _fire_profile_did_open(
-    monkeypatch, *, ankiweb_sync, mobile_enabled=True, warm_error=None
-):
+def _fire_profile_did_open(monkeypatch, *, mobile_enabled=True, warm_error=None,
+                           record=None, dispatch_error=None):
     """Register hooks, then fire the profile_did_open handler with the given
-    settings and return (profile_hooks, its stubbed ankimon_sync module)."""
+    settings. ``dispatch_error`` makes ``mw.taskman.run_in_background`` raise
+    it instead of running the task.
+
+    Returns ``(profile_hooks, stubbed ankimon_sync, stubbed save_transfer)`` —
+    the third is what lets a caller assert on the media-migration registration
+    without reaching into sys.modules itself."""
     _fresh_services(monkeypatch)
     gui_hooks = _fresh_gui_hooks()
     profile_hooks = _exec_profile_hooks(monkeypatch, gui_hooks)
     if warm_error is not None:
         profile_hooks._warm.side_effect = warm_error
+    if record is not None:
+        # side_effect rather than replacement: profile_hooks binds these names
+        # at import time, so the mock objects themselves have to stay.
+        for module_name, attribute in (
+            ("Ankimon.pyobj.save_transfer", "guard_media_saves_now"),
+            ("Ankimon.pyobj.tip_of_the_day", "show_tip_of_the_day"),
+            ("Ankimon.pyobj.save_transfer", "register_media_migration_hooks"),
+        ):
+            mock = getattr(sys.modules[module_name], attribute)
+            mock.side_effect = (lambda name: lambda *a, **k: record.append(name))(attribute)
 
     def _get(key, default=None):
         return {
-            "misc.ankiweb_sync": ankiweb_sync,
             "mobile.enabled": mobile_enabled,
         }.get(key, default)
 
@@ -276,6 +304,8 @@ def _fire_profile_did_open(
 
     # Run the backgrounded connectivity task synchronously so on_done executes.
     def _run_in_background(task, on_done=None):
+        if dispatch_error is not None:
+            raise dispatch_error
         value = task()
         if on_done is not None:
             on_done(_Future(value))
@@ -287,26 +317,72 @@ def _fire_profile_did_open(
     handler()
 
     sync_mod = sys.modules["Ankimon.pyobj.ankimon_sync"]
-    return profile_hooks, sync_mod
+    transfer_mod = sys.modules["Ankimon.pyobj.save_transfer"]
+    return profile_hooks, sync_mod, transfer_mod
 
 
-def test_sync_hooks_registered_even_when_ankiweb_sync_disabled(monkeypatch):
-    """Regression guard: mobile-review detection must be wired for a DEFAULT
-    user (misc.ankiweb_sync=False). Previously on_done returned early on the
-    False flag and setup_ankimon_sync_hooks was never called, so a mid-session
-    sync never turned phone reviews into battles."""
-    _, sync_mod = _fire_profile_did_open(monkeypatch, ankiweb_sync=False)
+def test_mobile_sync_hook_registered_with_shipped_defaults(monkeypatch):
+    """Regression guard for #586, restated for the post-removal world.
 
-    sync_mod.setup_ankimon_sync_hooks.assert_called_once()
-    # The OPT-IN file-based data-sync dialog stays gated behind the toggle.
-    sync_mod.check_and_sync_pokemon_data.assert_not_called()
-
-
-def test_sync_hooks_registered_when_ankiweb_sync_enabled(monkeypatch):
-    """With the file-sync toggle on, the hooks still register (unconditional)."""
-    _, sync_mod = _fire_profile_did_open(monkeypatch, ankiweb_sync=True)
+    Mobile-review detection must be wired for a default user. It previously
+    returned early on a False misc.ankiweb_sync, so a mid-session sync never
+    turned phone reviews into battles. There is no longer any setting that could
+    gate it, and this asserts that under the shipped configuration."""
+    _, sync_mod, _ = _fire_profile_did_open(monkeypatch)
 
     sync_mod.setup_ankimon_sync_hooks.assert_called_once()
+
+
+def test_media_migration_hooks_registered_on_profile_open(monkeypatch):
+    """The cleanup after the file-sync removal must be wired up. Registration —
+    not a bare one-shot call — because Anki fires profile_did_open one line
+    before it starts its own sync (aqt/main.py:568-569), so the scan also has to
+    run again once a media sync has actually delivered something."""
+    _, _, transfer_mod = _fire_profile_did_open(monkeypatch)
+
+    transfer_mod.register_media_migration_hooks.assert_called_once()
+    transfer_mod.guard_media_saves_now.assert_called_once()
+
+
+def test_the_media_guard_precedes_every_dialog_and_the_scan_follows_them(monkeypatch):
+    """A modal spins a nested event loop, which delivers taskman callbacks.
+
+    So the scan must be dispatched with nothing left in this handler that can
+    pump the loop -- otherwise its completion runs re-entrantly inside a dialog,
+    and the rescue it may offer reaches close_anki while Anki's loadProfile is
+    still on the stack. The guard is the opposite case: it has to be up before
+    the first of those dialogs, so it is called separately, first.
+    """
+    order = []
+    profile_hooks, _, transfer_mod = _fire_profile_did_open(
+        monkeypatch,
+        record=order,
+    )
+
+    assert order, "no ordered calls were recorded"
+    assert order[0] == "guard_media_saves_now"
+    assert order[-1] == "register_media_migration_hooks"
+    assert "show_tip_of_the_day" in order
+    assert order.index("guard_media_saves_now") < order.index("show_tip_of_the_day")
+    assert order.index("show_tip_of_the_day") < order.index("register_media_migration_hooks")
+
+
+def test_a_refused_connectivity_dispatch_still_reaches_the_media_migration(monkeypatch):
+    """The guard is armed at the top and only the media migration releases it.
+
+    The connectivity check is dispatched between the two, and the task manager
+    raises when its executor refuses work. Escaping there left media sync paused
+    for the session with no scan and no retry hook.
+    """
+    profile_hooks, _, transfer_mod = _fire_profile_did_open(
+        monkeypatch, dispatch_error=RuntimeError("executor unavailable")
+    )
+
+    transfer_mod.guard_media_saves_now.assert_called_once()
+    transfer_mod.register_media_migration_hooks.assert_called_once()
+    profile_hooks.logger.log.assert_any_call(
+        "error", "Could not schedule connectivity check: executor unavailable"
+    )
 
 
 # --- Static-data re-warm on profile open ------------------------------------
@@ -318,7 +394,7 @@ def test_sync_hooks_registered_when_ankiweb_sync_enabled(monkeypatch):
 
 
 def test_profile_open_rewarms_the_evolution_table(monkeypatch):
-    profile_hooks, _ = _fire_profile_did_open(monkeypatch, ankiweb_sync=False)
+    profile_hooks, _, _ = _fire_profile_did_open(monkeypatch)
 
     profile_hooks._warm.assert_called_once_with()
 
@@ -327,8 +403,8 @@ def test_profile_open_warm_failure_does_not_break_the_rest_of_the_handler(monkey
     """The warm is an optimization, and it runs first in the handler — a raise
     would take the mobile-sync hook registration and the tip of the day down
     with it, which costs far more than an unparsed CSV."""
-    profile_hooks, sync_mod = _fire_profile_did_open(
-        monkeypatch, ankiweb_sync=False, warm_error=OSError("data_files unreadable")
+    profile_hooks, sync_mod, _ = _fire_profile_did_open(
+        monkeypatch, warm_error=OSError("data_files unreadable")
     )
 
     profile_hooks._warm.assert_called_once_with()

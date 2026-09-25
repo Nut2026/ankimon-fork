@@ -18,6 +18,7 @@ from datetime import datetime
 import requests
 from aqt import QDialog, QVBoxLayout, QWebEngineView, QWebEnginePage, mw
 from aqt.qt import Qt, QUrl, QFrame, QWebEngineProfile
+
 try:
     from aqt.operations import QueryOp
 except ImportError:
@@ -37,12 +38,14 @@ except ImportError:
                 if self.success:
                     self.success(result)
             return self
+
 from PyQt6.QtCore import QObject, pyqtSlot, QTimer, QByteArray, QVariant
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QIcon
+
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWidgets import QStackedWidget
 import csv
-from ..utils import give_item, is_alive
+from ..utils import get_item_sprite_path, give_item, is_alive
 from ..pyobj.settings import DEFAULT_CONFIG, HUD_TOGGLE_AUTO_SYNC_KEYS
 
 try:
@@ -97,6 +100,7 @@ from ..functions.pokedex_functions import (
     _load_pokedex_cache,
     check_evolution_by_item,
     evolution_gender_allows,
+    evolution_time_allows,
     return_id_for_item_name,
 )
 from ..business import calculate_cp_from_dict
@@ -109,6 +113,21 @@ from ..events import events
 # lazy-import it in-method and degrade to a benign/neutral payload when it is
 # absent, so the host, shop, settings, profile, team, and monthly challenge 
 # screens all work with mobile not yet installed.
+
+
+def _local_pokemon_name(pokedex_id, english_fallback):
+    """Localized species name for the current language, English fallback."""
+    try:
+        lang = int(services.settings.get("misc.language", 9))
+        if lang != 9 and pokedex_id:
+            from ..functions.pokedex_functions import get_pokemon_diff_lang_name
+
+            loc = get_pokemon_diff_lang_name(int(pokedex_id), lang)
+            if loc and loc != "No Translation in this language":
+                return loc
+    except Exception:
+        pass
+    return english_fallback
 
 
 SCREEN_ITEMS = "items"
@@ -363,6 +382,13 @@ class MobileBridge(QObject):
         """
         try:
             db = services.db
+            # Language code (jp / sp / es_latam / en / ...) so the mobile battle
+            # narration can localize itself; mirrors move_names._current_lang_code.
+            try:
+                from ..move_names import _current_lang_code
+                mobile_language = _current_lang_code()
+            except Exception:
+                mobile_language = "en"
             # 1. Count and ease breakdown in one GROUP BY query (lightweight)
             rows = db.execute(
                 """SELECT ease, COUNT(*) as cnt FROM pending_mobile_battles
@@ -392,7 +418,7 @@ class MobileBridge(QObject):
             battle_count = resolved_battles + math.ceil(pending_count / cards_per_round)
 
             if pending_count == 0:
-                return {"pending_count": 0, "cap": 10000, "battle_count": 0}
+                return {"pending_count": 0, "cap": 10000, "battle_count": 0, "language": mobile_language}
 
             # Populate ease breakdown from rows count
             ease_breakdown = {"1": 0, "2": 0, "3": 0, "4": 0}
@@ -560,6 +586,7 @@ class MobileBridge(QObject):
                 "main_pokemon_sprite": main_pokemon_sprite,
                 "sprite_mode": sprite_mode,
                 "team_status": self.getTeamStatus(),
+                "language": mobile_language,
             }
         except Exception as e:
             import traceback
@@ -574,6 +601,7 @@ class MobileBridge(QObject):
                 "pending_count": 0,
                 "pending_count_at_start": 0,
                 "cap": 10000,
+                "language": "en",
             }
 
     @pyqtSlot(result="QVariant")
@@ -1137,6 +1165,7 @@ class AnkimonItemsWeb(QDialog):
 
         self.current_screen = None
         self.setWindowTitle("Ankimon")
+        self.setWindowIcon(QIcon(str(icon_path)))
 
         # Paint the shell dark from the first frame. The web views set their
         # own page background, but the surrounding QDialog/QFrame/QStackedWidget
@@ -1673,7 +1702,9 @@ class AnkimonItemsWeb(QDialog):
                 if pid and int(pid) > 0:
                     pid_val = int(pid)
                     if pid_val not in encounter_data.UNAVAILABLE:
-                        results.append({"id": pid_val, "name": pretty_name})
+                        results.append(
+                            {"id": pid_val, "name": _local_pokemon_name(pid_val, pretty_name)}
+                        )
             if len(results) >= 20:
                 break
         results.sort(key=lambda r: r["name"].lower())
@@ -1699,7 +1730,7 @@ class AnkimonItemsWeb(QDialog):
                 results.append(
                     {
                         "id": int(pid),
-                        "name": pretty_name,
+                        "name": _local_pokemon_name(int(pid), pretty_name),
                     }
                 )
         # Sort by name alphabetically
@@ -2367,7 +2398,19 @@ class AnkimonItemsWeb(QDialog):
         owned_quantity,
         equipped_instances=None,
     ):
-        ui_name = name.replace("-", " ").title()
+        from ..localized_text import (
+            item_name as _item_name,
+            item_description as _item_desc,
+            move_name as _move_name,
+            move_description as _move_desc,
+            type_name as _type_name,
+        )
+
+        english_ui_name = name.replace("-", " ").title()
+        if is_tm:
+            ui_name = _move_name(name, english_ui_name)
+        else:
+            ui_name = _item_name(name, english_ui_name)
         entry = {
             "name": name,
             "ui_name": ui_name,
@@ -2386,12 +2429,13 @@ class AnkimonItemsWeb(QDialog):
             entry["image_url"] = QUrl.fromLocalFile(
                 str(items_path / f"Bag_TM_{move_type}_SV_Sprite.png")
             ).toString()
-            short_desc = move.get("shortDesc") or ""
+            short_desc = _move_desc(name, move.get("shortDesc") or "")
             entry["description"] = (
                 f"Teaches a compatible Pokémon the move {ui_name}."
                 + (f" {short_desc}" if short_desc else "")
             )
             entry["move_type"] = move_type
+            entry["move_type_label"] = _type_name(move_type, move_type)
             entry["move_power"] = self._coerce_int(move.get("basePower"))
             accuracy = move.get("accuracy")
             entry["move_accuracy"] = (
@@ -2401,10 +2445,10 @@ class AnkimonItemsWeb(QDialog):
             entry["move_damage_class"] = (move.get("category") or "").title() or None
         else:
             entry["image_url"] = QUrl.fromLocalFile(
-                str(items_path / f"{name}.png")
+                str(get_item_sprite_path(name))
             ).toString()
-            entry["description"] = (
-                self._lookup_description(name) or f"A useful item: {ui_name}"
+            entry["description"] = _item_desc(
+                name, self._lookup_description(name) or f"A useful item: {ui_name}"
             )
 
         return entry
@@ -2718,6 +2762,9 @@ class AnkimonItemsWeb(QDialog):
                                 ):
                                     continue
 
+                                if not evolution_time_allows(target_data):
+                                    continue
+
                                 # "trade" belongs here alongside "useItem": Ankimon has no
                                 # trading, so the trade-with-held-item species (Rhydon ->
                                 # Rhyperior via Protector, Onix -> Steelix via Metal Coat,
@@ -2728,8 +2775,12 @@ class AnkimonItemsWeb(QDialog):
                                 # Normalize both sides by stripping spaces, hyphens and
                                 # apostrophes so pokedex.json display names (e.g.
                                 # "King's Rock") match items.csv identifiers (e.g.
-                                # "kings-rock"), which drop the apostrophe. Mirrors the
-                                # canonical logic in functions/pokedex_functions.py.
+                                # "kings-rock"), which drop the apostrophe. This is a
+                                # LOOSER fold than pokedex_functions.normalize_item_identifier:
+                                # it also strips hyphens (so "up-grade" and "upgrade" meet)
+                                # but does no NFKD or U+2019 folding. Deliberately separate —
+                                # it matches pokedex.json evoItem names, not items.csv keys —
+                                # so do not "unify" the two without checking both call sites.
                                 required_item = (
                                     (target_data.get("evoItem") or "")
                                     .lower()

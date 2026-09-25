@@ -179,7 +179,7 @@
       "H": "Chlorophyll"
     },
     "heightm": 24,
-    "weightkg": 0,
+    "weightkg": 250,
     "color": "Green",
     "eggGroups": [
       "Monster",
@@ -405,7 +405,7 @@
       "H": "Solar Power"
     },
     "heightm": 28,
-    "weightkg": 0,
+    "weightkg": 226.2,
     "color": "Red",
     "eggGroups": [
       "Monster",
@@ -590,7 +590,7 @@
       "H": "Rain Dish"
     },
     "heightm": 25,
-    "weightkg": 0,
+    "weightkg": 213.8,
     "color": "Blue",
     "eggGroups": [
       "Monster",
@@ -718,7 +718,7 @@
       "H": "Tinted Lens"
     },
     "heightm": 17,
-    "weightkg": 0,
+    "weightkg": 80,
     "color": "White",
     "eggGroups": [
       "Bug"
@@ -1865,7 +1865,7 @@
       "H": "Lightning Rod"
     },
     "heightm": 21,
-    "weightkg": 0,
+    "weightkg": 15,
     "color": "Yellow",
     "eggGroups": [
       "Field",
@@ -3269,7 +3269,7 @@
       "H": "Unnerve"
     },
     "heightm": 33,
-    "weightkg": 0,
+    "weightkg": 10.5,
     "color": "Yellow",
     "eggGroups": [
       "Field"
@@ -3833,7 +3833,7 @@
     "weightkg": 48,
     "color": "Brown",
     "prevo": "Kadabra",
-    "evoType": "trade",
+    "evoType": "useItem",
     "eggGroups": [
       "Human-Like"
     ],
@@ -3845,7 +3845,8 @@
       "Alakazam-Mega"
     ],
     "tier": "Illegal",
-    "isNonstandard": "Past"
+    "isNonstandard": "Past",
+    "evoItem": "Linking Cord"
   },
   "alakazammega": {
     "species_id": 65,
@@ -3983,13 +3984,14 @@
     "weightkg": 130,
     "color": "Gray",
     "prevo": "Machoke",
-    "evoType": "trade",
+    "evoType": "useItem",
     "eggGroups": [
       "Human-Like"
     ],
     "canGigantamax": "G-Max Chi Strike",
     "tier": "Illegal",
-    "isNonstandard": "Past"
+    "isNonstandard": "Past",
+    "evoItem": "Linking Cord"
   },
   "machampgmax": {
     "species_id": 68,
@@ -4018,7 +4020,7 @@
       "H": "Steadfast"
     },
     "heightm": 25,
-    "weightkg": 0,
+    "weightkg": 325,
     "color": "Gray",
     "eggGroups": [
       "Human-Like"
@@ -4400,7 +4402,7 @@
     "weightkg": 300,
     "color": "Brown",
     "prevo": "Graveler",
-    "evoType": "trade",
+    "evoType": "useItem",
     "eggGroups": [
       "Mineral"
     ],
@@ -4411,7 +4413,8 @@
       "Golem",
       "Golem-Alola"
     ],
-    "tier": "ZU"
+    "tier": "ZU",
+    "evoItem": "Linking Cord"
   },
   "golemalola": {
     "species_id": 76,
@@ -4440,11 +4443,12 @@
     "weightkg": 316,
     "color": "Gray",
     "prevo": "Graveler-Alola",
-    "evoType": "trade",
+    "evoType": "useItem",
     "eggGroups": [
       "Mineral"
     ],
-    "tier": "ZU"
+    "tier": "ZU",
+    "evoItem": "Linking Cord"
   },
   "ponyta": {
     "species_id": 77,
@@ -5332,7 +5336,7 @@
     "weightkg": 40.5,
     "color": "Purple",
     "prevo": "Haunter",
-    "evoType": "trade",
+    "evoType": "useItem",
     "eggGroups": [
       "Amorphous"
     ],
@@ -5344,7 +5348,8 @@
       "Gengar-Mega"
     ],
     "canGigantamax": "G-Max Terror",
-    "tier": "RU"
+    "tier": "RU",
+    "evoItem": "Linking Cord"
   },
   "gengarmega": {
     "species_id": 94,
@@ -5399,7 +5404,7 @@
       "0": "Cursed Body"
     },
     "heightm": 20,
-    "weightkg": 0,
+    "weightkg": 101.2,
     "color": "Purple",
     "eggGroups": [
       "Amorphous"
@@ -5589,7 +5594,7 @@
       "H": "Sheer Force"
     },
     "heightm": 19,
-    "weightkg": 0,
+    "weightkg": 150,
     "color": "Red",
     "eggGroups": [
       "Water 3"
@@ -6280,7 +6285,7 @@
     "weightkg": 34.6,
     "color": "Pink",
     "prevo": "Happiny",
-    "evoType": "levelHold",
+    "evoType": "useItem",
     "evoItem": "Oval Stone",
     "evoCondition": "during the day",
     "evos": [
@@ -7207,7 +7212,7 @@
       "H": "Hydration"
     },
     "heightm": 24,
-    "weightkg": 0,
+    "weightkg": 550,
     "color": "Blue",
     "eggGroups": [
       "Monster",
@@ -7357,7 +7362,7 @@
       "H": "Anticipation"
     },
     "heightm": 18,
-    "weightkg": 0,
+    "weightkg": 16.2,
     "color": "Brown",
     "eggGroups": [
       "Field"
@@ -7789,7 +7794,7 @@
       "H": "Gluttony"
     },
     "heightm": 35,
-    "weightkg": 0,
+    "weightkg": 1150,
     "color": "Black",
     "eggGroups": [
       "Monster"
@@ -8541,6 +8546,7 @@
     "actual_id": 10233,
     "name": "Typhlosion-Hisui",
     "baseSpecies": "Typhlosion",
+    "evoRegion": "Hisui",
     "forme": "Hisui",
     "types": [
       "Fire",
@@ -23088,6 +23094,7 @@
     "actual_id": 10236,
     "name": "Samurott-Hisui",
     "baseSpecies": "Samurott",
+    "evoRegion": "Hisui",
     "forme": "Hisui",
     "types": [
       "Water",
@@ -23867,12 +23874,13 @@
     "weightkg": 260,
     "color": "Blue",
     "prevo": "Boldore",
-    "evoType": "trade",
+    "evoType": "useItem",
     "eggGroups": [
       "Mineral"
     ],
     "tier": "Illegal",
-    "isNonstandard": "Past"
+    "isNonstandard": "Past",
+    "evoItem": "Linking Cord"
   },
   "woobat": {
     "species_id": 527,
@@ -24211,11 +24219,12 @@
     "weightkg": 87,
     "color": "Brown",
     "prevo": "Gurdurr",
-    "evoType": "trade",
+    "evoType": "useItem",
     "eggGroups": [
       "Human-Like"
     ],
-    "tier": "UU"
+    "tier": "UU",
+    "evoItem": "Linking Cord"
   },
   "tympole": {
     "species_id": 535,
@@ -24757,6 +24766,7 @@
     "actual_id": 10237,
     "name": "Lilligant-Hisui",
     "baseSpecies": "Lilligant",
+    "evoRegion": "Hisui",
     "forme": "Hisui",
     "types": [
       "Grass",
@@ -25761,7 +25771,7 @@
       "H": "Aftermath"
     },
     "heightm": 21,
-    "weightkg": 0,
+    "weightkg": 268.2,
     "color": "Green",
     "eggGroups": [
       "Mineral"
@@ -27926,6 +27936,7 @@
     "actual_id": 10240,
     "name": "Braviary-Hisui",
     "baseSpecies": "Braviary",
+    "evoRegion": "Hisui",
     "forme": "Hisui",
     "types": [
       "Psychic",
@@ -31589,6 +31600,7 @@
     "actual_id": 10241,
     "name": "Sliggoo-Hisui",
     "baseSpecies": "Sliggoo",
+    "evoRegion": "Hisui",
     "forme": "Hisui",
     "types": [
       "Steel",
@@ -31778,12 +31790,13 @@
     "weightkg": 71,
     "color": "Brown",
     "prevo": "Phantump",
-    "evoType": "trade",
+    "evoType": "useItem",
     "eggGroups": [
       "Grass",
       "Amorphous"
     ],
-    "tier": "ZU"
+    "tier": "ZU",
+    "evoItem": "Linking Cord"
   },
   "pumpkaboo": {
     "species_id": 710,
@@ -31958,7 +31971,7 @@
     "weightkg": 12.5,
     "color": "Brown",
     "prevo": "Pumpkaboo",
-    "evoType": "trade",
+    "evoType": "useItem",
     "eggGroups": [
       "Amorphous"
     ],
@@ -31974,7 +31987,8 @@
       "Gourgeist-Super"
     ],
     "tier": "Illegal",
-    "isNonstandard": "Past"
+    "isNonstandard": "Past",
+    "evoItem": "Linking Cord"
   },
   "gourgeistsmall": {
     "species_id": 711,
@@ -32003,11 +32017,12 @@
     "weightkg": 9.5,
     "color": "Brown",
     "prevo": "Pumpkaboo-Small",
-    "evoType": "trade",
+    "evoType": "useItem",
     "eggGroups": [
       "Amorphous"
     ],
-    "isNonstandard": "Past"
+    "isNonstandard": "Past",
+    "evoItem": "Linking Cord"
   },
   "gourgeistlarge": {
     "species_id": 711,
@@ -32036,11 +32051,12 @@
     "weightkg": 14,
     "color": "Brown",
     "prevo": "Pumpkaboo-Large",
-    "evoType": "trade",
+    "evoType": "useItem",
     "eggGroups": [
       "Amorphous"
     ],
-    "isNonstandard": "Past"
+    "isNonstandard": "Past",
+    "evoItem": "Linking Cord"
   },
   "gourgeistsuper": {
     "species_id": 711,
@@ -32069,11 +32085,12 @@
     "weightkg": 39,
     "color": "Brown",
     "prevo": "Pumpkaboo-Super",
-    "evoType": "trade",
+    "evoType": "useItem",
     "eggGroups": [
       "Amorphous"
     ],
-    "isNonstandard": "Past"
+    "isNonstandard": "Past",
+    "evoItem": "Linking Cord"
   },
   "bergmite": {
     "species_id": 712,
@@ -32151,6 +32168,7 @@
     "actual_id": 10243,
     "name": "Avalugg-Hisui",
     "baseSpecies": "Avalugg",
+    "evoRegion": "Hisui",
     "forme": "Hisui",
     "types": [
       "Ice",
@@ -32791,6 +32809,7 @@
     "actual_id": 10244,
     "name": "Decidueye-Hisui",
     "baseSpecies": "Decidueye",
+    "evoRegion": "Hisui",
     "forme": "Hisui",
     "types": [
       "Grass",
@@ -37388,7 +37407,7 @@
       "0": "Iron Fist"
     },
     "heightm": 25,
-    "weightkg": 0,
+    "weightkg": 2000,
     "color": "Gray",
     "eggGroups": [
       "Undiscovered"
@@ -37530,7 +37549,7 @@
       "H": "Grassy Surge"
     },
     "heightm": 28,
-    "weightkg": 0,
+    "weightkg": 225,
     "color": "Green",
     "eggGroups": [
       "Field",
@@ -37673,7 +37692,7 @@
       "H": "Libero"
     },
     "heightm": 27,
-    "weightkg": 0,
+    "weightkg": 82.5,
     "color": "White",
     "eggGroups": [
       "Field",
@@ -37816,7 +37835,7 @@
       "H": "Sniper"
     },
     "heightm": 40,
-    "weightkg": 0,
+    "weightkg": 113,
     "color": "Blue",
     "eggGroups": [
       "Water 1",
@@ -38005,7 +38024,7 @@
       "H": "Mirror Armor"
     },
     "heightm": 14,
-    "weightkg": 0,
+    "weightkg": 187.5,
     "color": "Purple",
     "eggGroups": [
       "Flying"
@@ -38138,7 +38157,7 @@
       "H": "Telepathy"
     },
     "heightm": 14,
-    "weightkg": 0,
+    "weightkg": 102,
     "color": "Red",
     "eggGroups": [
       "Bug"
@@ -38425,7 +38444,7 @@
       "H": "Swift Swim"
     },
     "heightm": 24,
-    "weightkg": 0,
+    "weightkg": 288.8,
     "color": "Green",
     "eggGroups": [
       "Monster",
@@ -38617,7 +38636,7 @@
       "H": "Flash Fire"
     },
     "heightm": 42,
-    "weightkg": 0,
+    "weightkg": 776.2,
     "color": "Black",
     "eggGroups": [
       "Mineral"
@@ -38719,7 +38738,7 @@
       "H": "Hustle"
     },
     "heightm": 24,
-    "weightkg": 0,
+    "weightkg": 2.5,
     "color": "Green",
     "eggGroups": [
       "Grass",
@@ -38787,7 +38806,7 @@
       "H": "Thick Fat"
     },
     "heightm": 24,
-    "weightkg": 0,
+    "weightkg": 32.5,
     "color": "Green",
     "eggGroups": [
       "Grass",
@@ -38884,7 +38903,7 @@
       "H": "Sand Veil"
     },
     "heightm": 22,
-    "weightkg": 0,
+    "weightkg": 163.8,
     "color": "Green",
     "eggGroups": [
       "Field",
@@ -39183,7 +39202,7 @@
       "H": "Technician"
     },
     "heightm": 24,
-    "weightkg": 0,
+    "weightkg": 100,
     "color": "Purple",
     "eggGroups": [
       "Human-Like"
@@ -39216,7 +39235,7 @@
       "H": "Technician"
     },
     "heightm": 24,
-    "weightkg": 0,
+    "weightkg": 100,
     "color": "Purple",
     "eggGroups": [
       "Human-Like"
@@ -39316,7 +39335,7 @@
       "H": "Flame Body"
     },
     "heightm": 75,
-    "weightkg": 0,
+    "weightkg": 300,
     "color": "Red",
     "eggGroups": [
       "Bug"
@@ -39657,7 +39676,7 @@
       "H": "Magic Bounce"
     },
     "heightm": 26,
-    "weightkg": 0,
+    "weightkg": 12.8,
     "color": "Pink",
     "eggGroups": [
       "Fairy"
@@ -39795,7 +39814,7 @@
       "H": "Pickpocket"
     },
     "heightm": 32,
-    "weightkg": 0,
+    "weightkg": 152.5,
     "color": "Purple",
     "eggGroups": [
       "Fairy",
@@ -40109,7 +40128,7 @@
       "H": "Aroma Veil"
     },
     "heightm": 30,
-    "weightkg": 0,
+    "weightkg": 1.2,
     "color": "Yellow",
     "eggGroups": [
       "Fairy",
@@ -40592,7 +40611,7 @@
       "H": "Heavy Metal"
     },
     "heightm": 23,
-    "weightkg": 0,
+    "weightkg": 1625,
     "color": "Green",
     "eggGroups": [
       "Field",
@@ -40784,7 +40803,7 @@
       "H": "Stalwart"
     },
     "heightm": 43,
-    "weightkg": 0,
+    "weightkg": 100,
     "color": "White",
     "eggGroups": [
       "Mineral",
@@ -41255,7 +41274,7 @@
       "0": "Unseen Fist"
     },
     "heightm": 29,
-    "weightkg": 0,
+    "weightkg": 262.5,
     "color": "Gray",
     "eggGroups": [
       "Undiscovered"
@@ -41290,7 +41309,7 @@
       "0": "Unseen Fist"
     },
     "heightm": 26,
-    "weightkg": 0,
+    "weightkg": 262.5,
     "color": "Gray",
     "eggGroups": [
       "Undiscovered"
@@ -41647,7 +41666,7 @@
     "color": "Brown",
     "prevo": "Scyther",
     "evoType": "useItem",
-    "evoCondition": "Black Augurite",
+    "evoItem": "Black Augurite",
     "eggGroups": [
       "Bug"
     ],
@@ -44863,7 +44882,8 @@
     "color": "Black",
     "prevo": "Bisharp",
     "evoType": "other",
-    "evoCondition": "Defeat 3 Bisharp leading Pawniard and level-up",
+    "evoCondition": "minimumDefeated",
+    "evoDefeated": 100,
     "eggGroups": [
       "Human-Like"
     ],

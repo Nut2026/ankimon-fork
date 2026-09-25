@@ -19,6 +19,7 @@ DEFAULT_CONFIG = {
     "battle.daily_average": 100,
     "battle.card_max_time": 60,
     "battle.review_based_damage": True,
+    "battle.ignore_learning_cards": False,
     "evolution.friendship_time_enabled": True,
     "evolution.day_start_hour": 6,
     "evolution.night_start_hour": 18,
@@ -36,6 +37,7 @@ DEFAULT_CONFIG = {
     "gui.show_sprites_across_ankimon": True,
     "gui.hud_styling": True,
     "gui.pop_up_dialog_message_on_defeat": False,
+    "gui.pop_up_dialog_message_on_encounter": False,
     "gui.pop_up_dialog_message_on_item": True,
     "gui.review_hp_bar_thickness": 2,
     "gui.reviewer_image_gif": False,
@@ -77,7 +79,6 @@ DEFAULT_CONFIG = {
     "misc.language": 9,
     "misc.ssh": True,
     "misc.leaderboard": False,
-    "misc.ankiweb_sync": False,
     "misc.YouShallNotPass_Ankimon_News": False,
     "misc.show_tip_on_startup": True,  # Added default for Tip of the Day
     "misc.discord_rich_presence": False,
@@ -87,6 +88,12 @@ DEFAULT_CONFIG = {
     "trainer.sprite": "ash",
     "trainer.id": 0,
     "trainer.cash": 0,
+    # "classic" = pre-Gen-6 behavior: one chosen holder splits XP 50/50 with
+    # the active Pokémon. "oras" = Gen 6+ Key Item behavior: the active
+    # Pokémon keeps full XP and the whole active team also earns a full
+    # share, no holder to pick. Defaults to "classic" so existing saves keep
+    # their current behavior until the player opts in.
+    "trainer.xp_share_mode": "classic",
     "trainer.cash_reward_amount": 40,
     "trainer.cash_reward_interval": 10,
     "trainer.cash_earned_today": 0,

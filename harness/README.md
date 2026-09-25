@@ -91,7 +91,31 @@ bash harness/setup_tier2.sh        # one-time: builds .tier2/ (venv + local Qt l
 source .tier2/env.sh               # LD_LIBRARY_PATH + QT_QPA_PLATFORM=offscreen + venv
 python -m harness.checks.probe_real_boot   # real add-on boots; objects are the REAL classes
 python -m harness.checks.probe_real_play   # plays via real hooks: real windows, real battles
+python -m harness.checks.probe_real_move_selection  # real modal input + cancellation + deletion
+python -m harness.checks.probe_real_tm_learnsets  # both TM screens: form filtering + SQLite saves
 ```
+
+The move-selection probe restores the real modal event loop for that dialog
+after boot (and restores the harness stub afterwards), and sends
+numeric and navigation key events through Qt, including the synchronous
+`focusObject()` press/release sequence used by Contanki. It covers duplicate
+input, cancellation, nested dialogs, modifiers, keypad input, and deletion.
+It runs in Tier-2 CI and through an isolated subprocess in the pytest suite.
+
+The TM probe also restores its dialog's native modal loop. It learns TMs through
+both the PC move manager and Pokémon details, checks exact owned/form-specific
+move lists against bundled tables, verifies SQLite saves and cancellation, and
+fails if either screen rereads the startup-warmed TM file. Set
+`ANKIMON_TM_SCREENSHOTS=/path/to/artifacts` to capture the Aegislash and Blaze
+Tauros pickers. It runs in Tier-2 CI and in an isolated pytest subprocess.
+
+This verifies controllers that **emit mapped keyboard events**. It does not
+emulate a physical controller or Contanki's mapping/state dispatch. In upstream
+[Contanki 7dbc573](https://github.com/roxgib/anki-contanki/blob/7dbc573144c91a586d51c5c6667ab022dcade5e8/contanki/funcs.py),
+`get_state()` returns `NoFocus` for unrecognized dialogs, and `Contanki.poll()`
+stops before emitting keys. Neither a Qt shortcut nor an application event
+filter can handle an event that was never sent. End-to-end Contanki validation
+therefore needs the installed version/fork, mappings, and its dialog support.
 
 Real browser screens use the separate `PyQt6-WebEngine` package. Install it only
 when needed, then run the strict browser probe:
@@ -101,6 +125,7 @@ bash harness/setup_webengine.sh
 source .tier2/env.sh
 export LD_LIBRARY_PATH="$PWD/.tier2/we-libs/extract/usr/lib/$(uname -m)-linux-gnu:$LD_LIBRARY_PATH"
 python -m harness.checks.probe_real_webengine  # real Chromium Settings page + DOM save
+python -m harness.checks.probe_real_hud_css    # reviewer styles in the real closed shadow root
 ```
 
 Drive it from Python (same action surface as Tier 1, via real hooks/windows):
@@ -145,6 +170,28 @@ remain useful on machines without Chromium. The dedicated
 `probe_real_webengine` check is strict: it imports `PyQt6-WebEngine`, refuses to
 fall back, opens the real HTML Settings shell, edits Trainer Name through the
 DOM, clicks Save, and verifies the SQLite-backed Settings service changed.
+
+`probe_real_hud_css` captures the real reviewer's generated JavaScript and runs
+it through the shipped HUD portal in Chromium. It checks computed XP/HP text
+styles, bar positioning, and a trailing-rule sentinel for all three layouts,
+both Anki themes, and both XP-bar positions. It prints the Chromium version;
+an optional PNG path saves a screenshot. CI runs it in the WebEngine job.
+
+For issue #864, the `font-color` typo and missing semicolon were already fixed
+on main by #795. Chromium 140 ignores the unknown declaration rather than
+rejecting the whole stylesheet; the visible regression is loss of the XP text
+color. Restoring that typo makes this probe fail its computed-color assertion.
+An unclosed block can instead swallow later rules, which the sentinel detects.
+
+The fuller report describes missing HP/XP bars and plain black text aligned
+left. Disabling **Styling** reproduces that presentation: the reviewer emits
+no CSS, the empty bar elements have zero height, and text uses normal flow.
+The probe verifies this state and recovery after enabling Styling again.
+If Styling is disabled, restore the normal display via **Ankimon Settings → HUD and Reviewer →
+HUD Element Toggles**, enable **Styling**, **HP Bars**, and **XP Progress Bar**,
+then save and reopen the reviewer. If those toggles are already enabled, this
+reproduction does not establish the reporter's cause; collect the exact Anki
+and Ankimon versions, a screenshot, and any reviewer console errors.
 
 ## Drive it from Python
 

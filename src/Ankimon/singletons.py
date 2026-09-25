@@ -479,6 +479,9 @@ def swap_ankimon_account():
         # returns a fresh, unrelated PokemonObject. Discarding that would leave
         # the live singleton — shared by test_window / battle_loop / pokemon_pc —
         # still showing the previous account's Pokemon, so apply it back.
+        from .battle_loop import _cancel_main_faint_deferral
+
+        _cancel_main_faint_deferral()
         new_main, _ = update_main_pokemon(services.main_pokemon)
         if new_main is not None and new_main is not services.main_pokemon:
             services.main_pokemon.update_stats(**new_main.to_dict())

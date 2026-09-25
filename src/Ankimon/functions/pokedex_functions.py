@@ -21,6 +21,7 @@ import functools
 import json
 import math
 import random
+import unicodedata
 import csv
 from ..pyobj.error_handler import show_warning_with_traceback
 from ..pyobj.pokemon_obj import PokemonObject
@@ -193,6 +194,7 @@ _stats_csv_cache = None
 _poke_evo_cache = None
 _moves_cache = None
 _items_cost_cache = None
+_items_cost_index = None
 
 
 def _load_pokemon_csv_cache():
@@ -365,6 +367,54 @@ def _load_items_cost_cache():
     return _items_cost_cache
 
 
+def load_items_cost_index():
+    """Build ``{folded identifier: row}`` over items.csv for O(1) item lookups.
+
+    The three item lookups fold BOTH sides of the comparison (see
+    :func:`normalize_item_identifier`), and folding the stored identifier is the
+    expensive half: done per row per call it re-folds all 2510 rows on every
+    lookup, which turned one shop build (``utils.daily_item_list``, two price
+    lookups per item over the sprite directory) into ~0.5s of pure NFKD.
+
+    Folding once at load leaves the ANSWER identical. The first row for a folded
+    key wins, exactly as the linear scan returned the first match — which
+    matters, because items.csv holds 345 surplus duplicate rows and five
+    identifiers whose duplicates disagree (``metronome`` is id 254/cost 4000 at
+    its first row and id 20118/cost 1000 later).
+
+    A row whose identifier folds to ``""`` is skipped, so a malformed blank
+    identifier cell cannot answer a lookup; callers pair this with rejecting an
+    empty folded name, since both sides fold to the same ``""``.
+    """
+    global _items_cost_index
+    if _items_cost_index is None:
+        index = {}
+        for row in _load_items_cost_cache():
+            folded = normalize_item_identifier(row.get("identifier"))
+            if folded and folded not in index:
+                index[folded] = row
+        _items_cost_index = index
+    return _items_cost_index
+
+
+def items_cost_index_for(file_path):
+    """:func:`load_items_cost_index`, but only when ``file_path`` IS items.csv.
+
+    The path comparison lives here rather than in the caller so that it cannot
+    disagree with the file the index was built from: a module that rebinds its
+    own ``csv_file_items_cost`` (a test patching the name, say) would otherwise
+    be handed the bundled index for a different file entirely.
+
+    ``None`` means "no index for this path" — either it is another file, or the
+    index came back empty because items.csv could not be read. Both send the
+    caller down its own file scan, which is what still surfaces an unreadable
+    file as that caller's warning-plus-fallback rather than a silent miss.
+    """
+    if str(file_path) != str(csv_file_items_cost):
+        return None
+    return load_items_cost_index() or None
+
+
 # === POKEMON NAME & DESCRIPTION CACHES ===
 _pokemon_names_cache = {}  # {(pokemon_id, language): name}
 _pokemon_descriptions_cache = {}  # {(species_id, language): description}
@@ -441,6 +491,11 @@ def clear_pokedex_caches():
     _pokedex_id_index = None
     _pokemon_names_cache = {}
     _pokemon_descriptions_cache = {}
+    # _items_cost_cache / _items_cost_index are deliberately NOT reset: items.csv
+    # is bundled static data, identical across profiles, so a profile switch has
+    # nothing to reload. If that ever changes they must be cleared as a PAIR —
+    # the index holds references into the rows the cache built, so clearing only
+    # the cache would leave the index answering from the pre-clear file.
 
 
 def _normalize_language_id(language):
@@ -602,6 +657,13 @@ def format_lore_name(name: str) -> str:
 
     if name.lower() == "eternatus-eternamax":
         return "Eternamax"
+
+    # Ash-Greninja has its own name; Battle-Bond Greninja is shown as plain
+    # "Greninja" in the games (the Ash form is battle-only).
+    if "-Ash" in name:
+        return "Ash-" + name.replace("-Ash", "")
+    if "-Bond" in name:
+        return name.replace("-Bond", "")
 
     # Order matters: check more specific ones first
     if "-Mega-X" in name:
@@ -798,6 +860,70 @@ def get_pokemon_descriptions(species_id, language):
         return "Description not found."
 
 
+# Regional / alternate form names in every localized language. format_lore_name
+# handles English; this covers the forms the games give a distinct, well-known
+# localized name to. Each language maps to (prefix, suffix) glued around the
+# localized base name — Japanese/Korean/Chinese prefix the region (アローラ +
+# ロコン); the European languages append it (Vulpix + " de Alola"). Language ids
+# are _normalize_language_id output: 1 jp · 3 kr · 4 ch · 5 fr · 6 de · 7 sp/latam
+# · 8 it.
+_FORM_NAME_LOCALIZATION = {
+    "-Alola": {
+        1: ("アローラ", ""), 3: ("알로라 ", ""), 4: ("阿羅拉", ""),
+        5: ("", " d'Alola"), 6: ("Alola-", ""), 7: ("", " de Alola"), 8: ("", " di Alola"),
+    },
+    "-Galar": {
+        1: ("ガラル", ""), 3: ("가라르 ", ""), 4: ("伽勒爾", ""),
+        5: ("", " de Galar"), 6: ("Galar-", ""), 7: ("", " de Galar"), 8: ("", " di Galar"),
+    },
+    "-Hisui": {
+        1: ("ヒスイ", ""), 3: ("히스이 ", ""), 4: ("洗翠", ""),
+        5: ("", " de Hisui"), 6: ("Hisui-", ""), 7: ("", " de Hisui"), 8: ("", " di Hisui"),
+    },
+    "-Paldea": {
+        1: ("パルデア", ""), 3: ("팔데아 ", ""), 4: ("帕底亞", ""),
+        5: ("", " de Paldea"), 6: ("Paldea-", ""), 7: ("", " de Paldea"), 8: ("", " di Paldea"),
+    },
+    "-Mega": {
+        1: ("メガ", ""), 3: ("메가 ", ""), 4: ("超級", ""),
+        5: ("Méga-", ""), 6: ("Mega-", ""), 7: ("Mega-", ""), 8: ("Mega", ""),
+    },
+    "-Mega-X": {
+        1: ("メガ", "Ｘ"), 3: ("메가 ", " X"), 4: ("超級", "Ｘ"),
+        5: ("Méga-", " X"), 6: ("Mega-", " X"), 7: ("Mega-", " X"), 8: ("Mega", " X"),
+    },
+    "-Mega-Y": {
+        1: ("メガ", "Ｙ"), 3: ("메가 ", " Y"), 4: ("超級", "Ｙ"),
+        5: ("Méga-", " Y"), 6: ("Mega-", " Y"), 7: ("Mega-", " Y"), 8: ("Mega", " Y"),
+    },
+    "-Primal": {
+        1: ("ゲンシ", ""), 3: ("원시 ", ""), 4: ("原始", ""),
+        5: ("Primo-", ""), 6: ("Proto-", ""), 7: ("", " primigenio"), 8: ("", " Primevo"),
+    },
+    # Ash-Greninja — a distinct localized name in the games.
+    "-Ash": {
+        1: ("サトシ", ""), 3: ("지우 ", ""), 4: ("小智", ""),
+        5: ("", " Sacha"), 6: ("", "-Ash"), 7: ("", " Ash"), 8: ("", " Ash"),
+    },
+}
+
+# Battle-only / cosmetic forms with no distinct name in any language — show the
+# plain species name.
+_FORM_BASE_ONLY = {"-Bond", "-Totem", "-Meteor", "-Zen", "-Gulping", "-Gorging",
+                   "-Busted", "-Noice", "-Hangry", "-Ash-Gmax"}
+
+
+def _localize_form_name(base_lang_name: str, suffix: str, language: int):
+    """Return a localized regional-form name, or None to fall back to English glue."""
+    if suffix in _FORM_BASE_ONLY:
+        return base_lang_name
+    mapping = _FORM_NAME_LOCALIZATION.get(suffix)
+    if not mapping or language not in mapping:
+        return None
+    prefix, tail = mapping[language]
+    return f"{prefix}{base_lang_name}{tail}"
+
+
 def get_pokemon_diff_lang_name(pokemon_id: int, language: int):
     """Get pokemon name in specified language from cache."""
     language = _normalize_language_id(language)
@@ -825,6 +951,9 @@ def get_pokemon_diff_lang_name(pokemon_id: int, language: int):
                 # If we have a hyphenated name, reconstruct with translated base
                 if "-" in raw_pokedex_name:
                     suffix = raw_pokedex_name[raw_pokedex_name.find("-") :]
+                    localized = _localize_form_name(base_lang_name, suffix, language)
+                    if localized:
+                        return localized
                     return format_lore_name(base_lang_name + suffix)
                 return format_lore_name(base_lang_name)
 
@@ -1141,7 +1270,42 @@ def filter_gender_split_forms(evo_ids, gender):
     return matching or ids
 
 
-def check_evolution_by_item(pokemon_id, item_id, gender=None):
+def evolution_required_time(target_data):
+    """Return ``"day"``/``"night"`` when a candidate is clock-gated, else None."""
+    if not isinstance(target_data, dict):
+        return None
+    condition = (target_data.get("evoCondition") or "").lower()
+    if "day" in condition:
+        return "day"
+    if "night" in condition:
+        return "night"
+    return None
+
+
+def evolution_time_allows(target_data, current_time=None) -> bool:
+    """Check the candidate’s day/night requirement using the evolution clock."""
+    if not isinstance(target_data, dict):
+        return False
+    required_time = evolution_required_time(target_data)
+    if required_time is None:
+        return True
+    return (current_time or get_time_of_day()) == required_time
+
+
+def item_evolution_time_requirement(pokemon_id, item_id, gender=None):
+    """Return day/night only when time is the sole unmet item-evolution requirement."""
+    if check_evolution_by_item(pokemon_id, item_id, gender=gender):
+        return None
+    evo_id = check_evolution_by_item(
+        pokemon_id, item_id, gender=gender, ignore_time=True
+    )
+    if not evo_id:
+        return None
+    pokedex_data = _load_pokedex_cache()
+    return evolution_required_time(pokedex_data.get(search_pokedex_by_id(evo_id)))
+
+
+def check_evolution_by_item(pokemon_id, item_id, gender=None, ignore_time=False):
     """
     Check if a Pokémon evolves using a specific item.
 
@@ -1211,6 +1375,12 @@ def check_evolution_by_item(pokemon_id, item_id, gender=None):
                             ):
                                 continue
 
+                            # ignore_time is only for explaining unavailable evolutions.
+                            if not ignore_time and not evolution_time_allows(
+                                target_data
+                            ):
+                                continue
+
                             # Normalize both sides by stripping spaces, hyphens and
                             # apostrophes so pokedex.json display names (e.g.
                             # "King's Rock") match items.csv identifiers (e.g.
@@ -1230,55 +1400,25 @@ def check_evolution_by_item(pokemon_id, item_id, gender=None):
                                 .replace("'", "")
                             )
                             if required_item == normalized_item_name:
-                                target_region = target_data.get("evoRegion")
-
-                                if target_region:
-                                    if (
-                                        active_region
-                                        and active_region.lower()
-                                        == target_region.lower()
-                                    ):
-                                        eligible_evos.append(target_data)
-                                else:
-                                    # A plain form is allowed unless a regional
-                                    # sibling matches the active region + method.
-                                    has_matching_regional_sibling = False
-                                    for sibling_name in evo_list:
-                                        sib_norm = (
-                                            sibling_name.lower()
-                                            .replace(" ", "")
-                                            .replace("-", "")
-                                            .replace("'", "")
-                                            .replace(".", "")
-                                            .replace(":", "")
-                                        )
-                                        sib_data = pokedex_data.get(
-                                            sib_norm
-                                        ) or pokedex_data.get(sibling_name.lower())
-                                        if (
-                                            sib_data
-                                            and sib_data.get("evoRegion")
-                                            and active_region
-                                            and sib_data.get("evoRegion").lower()
-                                            == active_region.lower()
-                                        ):
-                                            if (
-                                                sib_data.get("evoType")
-                                                == target_data.get("evoType")
-                                                and (
-                                                    sib_data.get("evoItem") or ""
-                                                ).lower()
-                                                == (
-                                                    target_data.get("evoItem") or ""
-                                                ).lower()
-                                            ):
-                                                has_matching_regional_sibling = True
-                                                break
-                                    if not has_matching_regional_sibling:
-                                        eligible_evos.append(target_data)
+                                eligible_evos.append(target_data)
 
                     if eligible_evos:
-                        eligible_evos.sort(key=lambda x: 0 if x.get("evoRegion") else 1)
+                        # A matching regional form takes precedence over a plain
+                        # sibling. Otherwise use the plain form; unique regional
+                        # item routes such as Scyther -> Kleavor still work in
+                        # any region because there is no plain sibling for the
+                        # same item.
+                        def region_priority(candidate):
+                            region = candidate.get("evoRegion")
+                            if (
+                                region
+                                and active_region
+                                and region.lower() == active_region.lower()
+                            ):
+                                return 0
+                            return 1 if not region else 2
+
+                        eligible_evos.sort(key=region_priority)
                         target_data = eligible_evos[0]
                         evo_id = safe_int(
                             target_data.get("actual_id")
@@ -1784,6 +1924,34 @@ def return_name_for_id(pokemon_id):
         return None
 
 
+def normalize_item_identifier(value) -> str:
+    """Fold an item name to the shape ``items.csv`` keys on.
+
+    Applied to BOTH sides of every lookup, so a display name and the CSV
+    identifier meet in the middle. Without folding the CSV side too, the nine
+    identifiers that themselves carry a typographic apostrophe or an accent
+    (``koraidon’s-poké-ball``, ``kofu’s-wallet``, ``leader’s-crest``,
+    ``jalapeño``, ``flabébé-pollen``, the three ``-poké-ball-pick`` rows)
+    stay unreachable from any name a user or the UI would supply.
+
+    The steps, in order: strip, lowercase, fold U+2019 to a plain apostrophe,
+    strip combining accents via NFKD, spaces to hyphens, then drop apostrophes.
+
+    Verified against the shipped items.csv: this merges no two DISTINCT
+    identifiers — 2165 distinct raw identifiers over 2510 rows fold to exactly
+    2165 distinct keys, so every collision bucket holds repeats of one identical
+    raw string (the file already contained 344 such repeated identifiers before
+    any folding). Non-string input folds to ``""`` rather than raising, so a
+    caller passing an int gets a clean miss; callers must treat that ``""`` as a
+    miss outright rather than a key to match on.
+    """
+    if not isinstance(value, str):
+        return ""
+    folded = unicodedata.normalize("NFKD", value.strip().lower().replace("’", "'"))
+    folded = "".join(ch for ch in folded if not unicodedata.combining(ch))
+    return folded.replace(" ", "-").replace("'", "")
+
+
 def return_id_for_item_name(item_name):
     """
     Returns the ID of an item based on its name (identifier) from a CSV file.
@@ -1796,10 +1964,10 @@ def return_id_for_item_name(item_name):
         None: If no matching item is found or an error occurs.
     """
     try:
-        normalized_name = (item_name or "").lower().replace(" ", "-").replace("'", "")
-        cache = _load_items_cost_cache()
-        for row in cache:
-            if row["identifier"] == normalized_name:
+        normalized_name = normalize_item_identifier(item_name)
+        if normalized_name:
+            row = load_items_cost_index().get(normalized_name)
+            if row is not None:
                 return row["id"]
 
         # Log a message if the item is not found
