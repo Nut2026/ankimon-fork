@@ -37,6 +37,7 @@ class BackupManager:
     # Retention renames a directory to this prefix before deleting inside it,
     # taking it out of the listing and the count; a later pass finishes it.
     DISCARD_PREFIX = ".discard_"
+    MIGRATING_PREFIX = ".migrating_"
 
     def __init__(self, logger, settings_obj):
         self.logger = logger
@@ -63,6 +64,46 @@ class BackupManager:
         return _is_link(path)
 
     @staticmethod
+    def _publish_via_staging(source: Path, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = destination.with_name(
+            f"{BackupManager.MIGRATING_PREFIX}{uuid.uuid4().hex[:8]}_{destination.name}"
+        )
+        try:
+            shutil.move(str(source), str(staging))
+        except Exception:
+            BackupManager._discard_migration_staging(staging)
+            raise
+        try:
+            os.replace(str(staging), str(destination))
+        except Exception:
+            BackupManager._discard_migration_staging(staging)
+            raise
+
+    @staticmethod
+    def _discard_migration_staging(staging: Path) -> None:
+        try:
+            if staging.is_dir() and not BackupManager._is_link(staging):
+                shutil.rmtree(staging, ignore_errors=True)
+            else:
+                staging.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _relocate_link(item: Path, destination: Path) -> Optional[str]:
+        try:
+            referent = item.resolve(strict=False)
+        except OSError:
+            return None
+        if not referent.exists() and not referent.is_symlink():
+            return None
+        try:
+            return os.path.relpath(referent, destination.parent)
+        except ValueError:
+            return None
+
+    @staticmethod
     def _move_backup_contents(source: Path, destination: Path) -> None:
         """Move every entry from ``source`` into ``destination``.
 
@@ -76,38 +117,40 @@ class BackupManager:
         Directory links (symlinks, junctions) are never followed: recursing
         through one would move files from outside the backups folder, and the
         subsequent ``rmdir()`` would fail on the link itself. A link is moved
-        as a link.
+        as a link, with its referent preserved for relative links. A cross-
+        volume move is staged in a hidden directory first, so a partial copy
+        can never appear under a published ``backup_*`` name.
         """
         for item in source.iterdir():
+            target = destination / item.name
+
             if BackupManager._is_link(item):
-                target = destination / item.name
                 if target.exists() or target.is_symlink():
                     target = BackupManager._legacy_collision_name(target)
-                shutil.move(str(item), str(target))
+                new_target = BackupManager._relocate_link(item, target)
+                if new_target is None:
+                    raise OSError(
+                        f"Cannot preserve the referent of linked backup entry "
+                        f"{item.name}; leaving it in place."
+                    )
+                os.symlink(new_target, str(target), target_is_directory=item.is_dir())
+                item.unlink()
                 continue
 
-            target = destination / item.name
             if target.exists():
                 if item.is_dir() and target.is_dir():
                     renamed = BackupManager._legacy_collision_name(target)
-                    shutil.move(str(item), str(renamed))
+                    BackupManager._publish_via_staging(item, renamed)
                 else:
                     renamed = target.with_name(
                         f"{target.stem}__legacy_{uuid.uuid4().hex[:8]}{target.suffix}"
                     )
-                    shutil.move(str(item), str(renamed))
+                    BackupManager._publish_via_staging(item, renamed)
             else:
-                shutil.move(str(item), str(target))
+                BackupManager._publish_via_staging(item, target)
 
     @staticmethod
     def _legacy_collision_name(target: Path) -> Path:
-        """A sibling name for a legacy entry that collided with ``target``.
-
-        For a ``backup_*`` directory the rename stays inside the ``backup_``
-        namespace, so ``get_backups()`` still finds the legacy snapshot and its
-        inner ``ankimon.db`` keeps the name the listing and restore paths
-        expect. Other collisions simply gain the legacy suffix.
-        """
         return target.with_name(f"{target.name}__legacy_{uuid.uuid4().hex[:8]}")
 
     def _migrate_legacy_backups(self, profile_folder: Path) -> None:
@@ -119,6 +162,12 @@ class BackupManager:
             self.logger.log(
                 "error",
                 f"Refusing to migrate linked legacy backups directory: {legacy_path}",
+            )
+            return
+        if self._is_link(new_path):
+            self.logger.log(
+                "error",
+                f"Refusing to migrate into linked backups directory: {new_path}",
             )
             return
 
@@ -139,6 +188,12 @@ class BackupManager:
             self.logger.log("error", f"Failed to migrate legacy backups: {error}")
 
         candidate = profile_folder / "Ankimon_Backups"
+        if self._is_link(candidate):
+            self.logger.log(
+                "error",
+                f"Refusing to activate linked backups directory: {candidate}",
+            )
+            return
         try:
             candidate.mkdir(parents=True, exist_ok=True)
         except Exception as error:
@@ -918,6 +973,17 @@ class BackupManager:
             except OSError:
                 continue
             if not self._discard(staging, "incomplete backup", deadline):
+                return
+
+        for migrating in self.backups_path.glob(f"{self.MIGRATING_PREFIX}*"):
+            try:
+                if not migrating.is_dir() or self._is_link(migrating):
+                    continue
+                if time.time() - os.path.getmtime(migrating) < self.STALE_STAGING_AGE:
+                    continue
+            except OSError:
+                continue
+            if not self._discard(migrating, "incomplete migration copy", deadline):
                 return
 
         # What an earlier pass renamed out of the listing but could not finish
