@@ -1448,3 +1448,134 @@ def test_migration_moves_a_linked_entry_without_following_it(mock_env, tmp_path)
     assert (bm.backups_path / "linked-entry").is_symlink()
     assert (bm.backups_path / "backup_2026-09-25_13-00-00" / "ankimon.db").read_bytes() == b"legacy"
     assert not legacy_root.exists()
+
+
+def _legacy_migration_save(mock_env):
+    bm, _, _, addon_dir = mock_env
+    root = addon_dir.parent / "ankimon_backups"
+    backup = root / "backup_2026-09-25_12-00-00"
+    backup.mkdir(parents=True)
+    _seed_db(backup / "ankimon.db", "Legacy", 111)
+    return bm, root, backup
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_migration_publication_failure_preserves_save(mock_env, monkeypatch, interrupted):
+    bm, root, backup = _legacy_migration_save(mock_env)
+    original = (backup / "ankimon.db").read_bytes()
+    old = time.time() - 7200
+    os.utime(backup, (old, old))
+
+    def refuse_publication(source, destination):
+        if interrupted:
+            raise KeyboardInterrupt("interrupted before publication")
+        raise PermissionError("publication temporarily locked")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(os, "replace", refuse_publication)
+        if interrupted:
+            with pytest.raises(KeyboardInterrupt):
+                bm.refresh_profile_path()
+        else:
+            bm.refresh_profile_path()
+        assert (backup / "ankimon.db").read_bytes() == original
+        # Simulate cleanup before a retry; abandoned staging is never the only copy.
+        bm.backups_path = root.parent / "anki-profile" / "Ankimon_Backups"
+        bm._sweep_leftovers()
+        assert (backup / "ankimon.db").read_bytes() == original
+
+    bm.refresh_profile_path()
+    assert not root.exists()
+    assert len(bm.get_backups()) == 1
+    assert (bm.backups_path / backup.name / "ankimon.db").read_bytes() == original
+
+
+def test_migration_partial_copy_stays_hidden(mock_env, monkeypatch):
+    import shutil
+
+    bm, _, backup = _legacy_migration_save(mock_env)
+    original = (backup / "ankimon.db").read_bytes()
+
+    def disk_full(source, destination, **kwargs):
+        Path(destination).write_bytes(b"partial database")
+        raise OSError("disk full during copy")
+
+    monkeypatch.setattr(shutil, "copy2", disk_full)
+    bm.refresh_profile_path()
+    assert (backup / "ankimon.db").read_bytes() == original
+    assert bm.get_backups() == []
+    assert list(bm.backups_path.iterdir()) == []
+
+
+def test_migration_failed_source_cleanup_keeps_published_save(mock_env, monkeypatch):
+    import shutil
+
+    bm, _, backup = _legacy_migration_save(mock_env)
+    original = (backup / "ankimon.db").read_bytes()
+    real_rmtree = shutil.rmtree
+
+    def failed_cleanup(path, *args, **kwargs):
+        if Path(path) == backup:
+            (backup / "ankimon.db").unlink()
+            raise PermissionError("source cleanup interrupted")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", failed_cleanup)
+    bm.refresh_profile_path()
+    assert len(bm.get_backups()) == 1
+    assert (bm.backups_path / backup.name / "ankimon.db").read_bytes() == original
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs privileges on Windows")
+def test_migration_preserves_nested_relative_db_link(mock_env):
+    bm, root, backup = _legacy_migration_save(mock_env)
+    archive = root.parent / "archive"
+    archive.mkdir()
+    referent = archive / "original.db"
+    (backup / "ankimon.db").rename(referent)
+    original = referent.read_bytes()
+    (backup / "ankimon.db").symlink_to("../../archive/original.db")
+
+    bm.refresh_profile_path()
+
+    migrated = bm.backups_path / backup.name / "ankimon.db"
+    assert migrated.is_symlink()
+    assert migrated.resolve() == referent
+    assert migrated.read_bytes() == original
+    assert len(bm.get_backups()) == 1
+    assert not root.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs privileges on Windows")
+@pytest.mark.parametrize("link_first", [False, True])
+def test_migration_maps_links_to_collision_renamed_sibling(mock_env, monkeypatch, link_first):
+    bm, root, backup = _legacy_migration_save(mock_env)
+    original = (backup / "ankimon.db").read_bytes()
+    alias = root / "backup_2026-09-25_13-00-00"
+    alias.symlink_to(backup.name, target_is_directory=True)
+    linked_backup = root / "backup_2026-09-25_14-00-00"
+    linked_backup.mkdir()
+    (linked_backup / "ankimon.db").symlink_to(f"../{backup.name}/ankimon.db")
+    existing = bm.backups_path / backup.name
+    existing.mkdir()
+    _seed_db(existing / "ankimon.db", "Existing", 999)
+    existing_bytes = (existing / "ankimon.db").read_bytes()
+    real_iterdir = Path.iterdir
+
+    def ordered_entries(path):
+        if path == root:
+            entries = [alias, linked_backup, backup] if link_first else [backup, linked_backup, alias]
+            return iter(entries)
+        return real_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", ordered_entries)
+    bm.refresh_profile_path()
+
+    assert not root.exists()
+    assert (existing / "ankimon.db").read_bytes() == existing_bytes
+    migrated = next(bm.backups_path.glob(f"{backup.name}__legacy_*"))
+    assert (bm.backups_path / alias.name).resolve() == migrated
+    nested = bm.backups_path / linked_backup.name / "ankimon.db"
+    assert nested.resolve() == migrated / "ankimon.db"
+    assert nested.read_bytes() == original
+    assert len(bm.get_backups()) == 4
