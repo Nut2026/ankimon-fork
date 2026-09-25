@@ -929,11 +929,6 @@ def check_and_award_monthly_pokemon(logger, defer=True):
                 current_status = int(current_status)
             except (TypeError, ValueError):
                 current_status = 0
-            current_id = db.get_user_data("monthly_challenge_id")
-
-            if current_id is None or str(current_id) != str(new_pokemon["individual_id"]):
-                logger.log("info", "Discarding monthly challenge decision: tracking id changed while dialog was open.")
-                return
 
             if db.get_pokemon(new_pokemon["individual_id"]) is not None:
                 db.set_monthly_challenge_state(new_pokemon["individual_id"], 1)
