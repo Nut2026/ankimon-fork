@@ -923,29 +923,6 @@ def check_and_award_monthly_pokemon(logger, defer=True):
             if db.get_user_data("rate_this") not in (True, "true"):
                 logger.log("info", "Discarding monthly challenge decision: user has not rated the addon on the current account.")
                 return
-
-            current_status = db.get_user_data("monthly_challenge", 0)
-            try:
-                current_status = int(current_status)
-            except (TypeError, ValueError):
-                current_status = 0
-
-            if db.get_pokemon(new_pokemon["individual_id"]) is not None:
-                db.set_monthly_challenge_state(new_pokemon["individual_id"], 1)
-                logger.log("info", "Monthly challenge Pokémon already present in collection; tracking state reconciled.")
-                return
-
-            if current_status == 2:
-                logger.log("info", "Discarding monthly challenge decision: challenge was already rejected.")
-                return
-
-            if accepted and current_status == 1:
-                logger.log("info", "Discarding monthly challenge acceptance: challenge was already accepted.")
-                return
-
-            if not accepted and current_status == 1:
-                logger.log("info", "Discarding monthly challenge rejection: challenge was already accepted.")
-                return
         except Exception as e:
             logger.log("error", f"Error rechecking monthly challenge state before saving: {e}")
             return
