@@ -57,6 +57,7 @@ def _on_profile_close():
 
 def _on_profile_did_open(online_connectivity):
     def handler():
+        profile_col = getattr(mw, "col", None)
         # Re-warm the static evolution table _on_profile_close just dropped.
         # The boot warm (startup.run_startup_background_checks) runs once per
         # Anki PROCESS, so a profile SWITCH leaves pokemon_evolution.csv
@@ -158,6 +159,8 @@ def _on_profile_did_open(online_connectivity):
             return online_connectivity
 
         def on_done(future) -> None:
+            if profile_col is None or mw.col is not profile_col:
+                return
             is_online = future.result()
             # We want to use the result of the background check
             try:

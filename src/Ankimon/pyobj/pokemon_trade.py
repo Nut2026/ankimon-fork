@@ -15,6 +15,7 @@ from ..functions.pokedex_functions import get_base_experience, get_growth_rate
 from ..utils import get_tier_by_id
 from .error_handler import show_warning_with_traceback
 from ..services import services
+from ..events import events
 import os
 
 
@@ -68,7 +69,7 @@ def _challenge_palette():
 def _build_sprite_box(container_size, sprite_size, challenge_pokemon, show_sprites):
     """Build a sprite box QFrame with the given dimensions and Pokémon data."""
     from PyQt6.QtWidgets import QSizePolicy
-    from PyQt6.QtGui import QMovie
+    from PyQt6.QtGui import QMovie, QImageReader
     
     sprite_box = QFrame()
     sprite_box.setObjectName("spriteBox")
@@ -103,6 +104,13 @@ def _build_sprite_box(container_size, sprite_size, challenge_pokemon, show_sprit
             if os.path.exists(sprite_path):
                 movie = QMovie(sprite_path)
                 movie.setParent(sprite_label)  # Keep movie alive with the label
+                # Read dimensions without decoding into QMovie: caching its
+                # first frame before setting the scale leaves that frame full-size.
+                frame_size = QImageReader(sprite_path).size()
+                if frame_size.isValid():
+                    movie.setScaledSize(frame_size.scaled(
+                        sprite_label.size(), Qt.AspectRatioMode.KeepAspectRatio
+                    ))
                 sprite_label.setMovie(movie)
                 movie.start()
         except Exception:
@@ -145,24 +153,36 @@ def create_monthly_challenge_pokemon(pokemon_data, make_shiny=False):
         "held_item": pokemon_data.get("held_item", None)
     }
 
-def add_pokemon_to_collection(new_pokemon, refresh_callback=None, parent_window=None):
-    """Adds a Pokémon to the user's collection in the database."""
+def _refresh_collection(refresh_callback=None, parent_window=None):
+    """Refresh presentation independently of the already committed award."""
     try:
-        db = services.db
-        db.save_pokemon(new_pokemon)
         if refresh_callback:
             refresh_callback()
-
-        # Refresh open PC Box window. Read services.pokemon_pc directly:
-        # `from ..singletons import pokemon_pc` lands in the lazy __getattr__
-        # factory and would force-construct a PC window the user never opened.
         from ..utils import is_alive
         if is_alive(services.pokemon_pc):
             services.pokemon_pc.refresh_pokemon_grid()
-        return True
+    except Exception as e:
+        show_warning_with_traceback(
+            parent=parent_window, exception=e, message="Error refreshing Pokemon collection"
+        )
+
+
+def add_pokemon_to_collection(new_pokemon, refresh_callback=None, parent_window=None, *, refresh=True):
+    """Return whether persistence succeeded; presentation cannot undo a save.
+
+    Monthly awards defer refresh until their decision has also been persisted.
+    The failure dialog can run an event loop, so callers must recheck their
+    session before doing any further database work.
+    """
+    try:
+        if not services.db.save_pokemon(new_pokemon):
+            return False
     except Exception as e:
         show_warning_with_traceback(parent=parent_window, exception=e, message="Error adding Pokemon to collection")
         return False
+    if refresh:
+        _refresh_collection(refresh_callback, parent_window)
+    return True
 
 def show_monthly_challenge_dialog(challenge_pokemon, description, parent_window=None):
     """
@@ -627,7 +647,7 @@ def show_monthly_rejection_dialog(parent_window=None, challenge_pokemon=None):
 
     message = QLabel(
         "No problem! If you ever change your mind or decide to take the Tauros by "
-        "the horns, head to <b>Ankimon → Profile → Monthly Challenge</b> to reclaim this month's Pokémon or view past challenges. Happy Ankimoning!"
+        "the horns, head to <b>Ankimon → Profile → Monthly Challenge</b> to reclaim this month's Pokémon. Happy Ankimoning!"
     )
     message.setWordWrap(True)
     message.setStyleSheet(f"color: {text}; font-size: 0.95rem; line-height: 1.6; padding: 4px 0;")
@@ -647,9 +667,15 @@ def show_monthly_rejection_dialog(parent_window=None, challenge_pokemon=None):
 
     window.exec()
 
-def check_and_award_monthly_pokemon(logger, defer=True):
+def check_and_award_monthly_pokemon(logger, defer=True, *, reclaim=False):
     """
     Check for and award the current month's challenge Pokémon to the user.
+
+    ``reclaim=True`` is the explicit Profile menu action: it may offer a
+    previously rejected reward, or show progress for an owned reward. It never
+    clears a rejection before a replacement decision is successfully saved.
+    One request per active session stays pending through all modal dialogs.
+
 
     This function handles the complete monthly challenge workflow including:
     1. Verifying the user has rated the addon (required for eligibility)
@@ -772,11 +798,13 @@ def check_and_award_monthly_pokemon(logger, defer=True):
 
     def _process_on_main_thread(result_data, db, db_token, col, current_month_str):
         """Apply the fetched challenge to the database on the main thread."""
-        if result_data is None:
-            return
-
         if not _session_unchanged(db, db_token, col):
             logger.log("info", "Discarded the monthly challenge result: the Ankimon database or Anki profile changed while it was being fetched.")
+            return
+
+        if result_data is None:
+            if reclaim:
+                services.ui.notify("warning", "No monthly challenge could be loaded. Please try again later.")
             return
 
         current_challenge = result_data["current_challenge"]
@@ -792,6 +820,16 @@ def check_and_award_monthly_pokemon(logger, defer=True):
 
         # Edge case: Pokémon exists in collection but database tracking values are missing or stale
         pokemon_in_collection = db.get_pokemon(challenge_individual_id) is not None
+
+        if reclaim and pokemon_in_collection:
+            owned = db.get_pokemon(challenge_individual_id)
+            services.ui.notify(
+                "info",
+                f"This month's Pokémon is already in your collection: {escape(str(owned.get('name', 'Pokémon')))}. "
+                f"Level: {escape(str(owned.get('level', 1)))}. "
+                f"Pokémon defeated: {escape(str(owned.get('pokemon_defeated', 0)))}.",
+            )
+            return
 
         # RECONCILE FIRST: If Pokémon exists in collection, sync tracking before any reset
         if pokemon_in_collection:
@@ -809,7 +847,7 @@ def check_and_award_monthly_pokemon(logger, defer=True):
             db.set_monthly_challenge_state(challenge_individual_id, 0)
             monthly_status = 0
 
-        if monthly_status == 2:
+        if monthly_status == 2 and not reclaim:
             logger.log("info", f"Monthly challenge for {current_month_str} was rejected.")
             return
 
@@ -837,38 +875,47 @@ def check_and_award_monthly_pokemon(logger, defer=True):
         new_pokemon = create_monthly_challenge_pokemon(challenge_pokemon_data, make_shiny=make_shiny)
         shiny_text = " (Shiny)" if new_pokemon["shiny"] else ""
 
-        if monthly_status == 1:
-            # Already accepted, but the Pokémon is gone: restore it without
-            # asking again. The status stays 1 either way, so a failed restore
-            # is retried on the next check rather than turned into a prompt.
-            if add_pokemon_to_collection(new_pokemon, parent_window=mw):
-                logger.log("info", f"Re-awarded accepted monthly challenge Pokémon {new_pokemon['name']}{shiny_text}.")
+        def award():
+            # No refresh or informational dialog until both the Pokemon and
+            # its accepted decision are committed. A failed save may show an
+            # error dialog, but never triggers a "rollback" into another save.
+            success = add_pokemon_to_collection(new_pokemon, parent_window=mw, refresh=False)
+            if not _session_unchanged(db, db_token, col):
+                return
+            if not success:
+                logger.log("error", f"Failed to award {new_pokemon['name']}; keeping the previous challenge decision for a retry.")
+                return
+            if monthly_status != 1:
+                db.set_monthly_challenge_state(challenge_individual_id, 1)
+            events.emit("monthly_challenge", decision="accepted", individual_id=challenge_individual_id, restored=monthly_status == 1)
+            logger.log("info", f"Successfully awarded {new_pokemon['name']}{shiny_text}.")
+            _refresh_collection(parent_window=mw)
+            if _session_unchanged(db, db_token, col):
                 show_monthly_acceptance_dialog(parent_window=mw, challenge_pokemon=new_pokemon)
-            else:
-                logger.log("error", f"Failed to re-award {new_pokemon['name']}; monthly challenge stays accepted and will retry.")
+
+        if monthly_status == 1:
+            award()
             return
 
+        # Other UI (or sync) may change the decision/collection while exec()
+        # runs. Keep the exact offered state so a stale prompt cannot overwrite
+        # another decision or replace an owned Pokemon's progress.
+        offered_state = (db.get_user_data("monthly_challenge_id"), db.get_user_data("monthly_challenge", 0))
         description = current_challenge.get("description", "")
         accepted = show_monthly_challenge_dialog(new_pokemon, description, parent_window=mw)
-
-        # exec() runs a nested event loop, so a sync hook can switch the
-        # database while the dialog is open. Never record the decision into a
-        # different save than the one it was offered for.
         if not _session_unchanged(db, db_token, col):
             logger.log("warning", "Discarded the monthly challenge decision: the Ankimon database or Anki profile changed while the dialog was open.")
             return
+        current_state = (db.get_user_data("monthly_challenge_id"), db.get_user_data("monthly_challenge", 0))
+        if current_state != offered_state or db.get_pokemon(challenge_individual_id) is not None:
+            logger.log("info", "Discarded a stale monthly challenge decision: the decision or collection changed while the dialog was open.")
+            return
 
         if accepted:
-            success = add_pokemon_to_collection(new_pokemon, parent_window=mw)
-            if success:
-                db.set_monthly_challenge_state(new_pokemon["individual_id"], 1)
-                logger.log("info", f"Successfully awarded {new_pokemon['name']}{shiny_text}.")
-                show_monthly_acceptance_dialog(parent_window=mw, challenge_pokemon=new_pokemon)
-            else:
-                db.set_monthly_challenge_state(new_pokemon["individual_id"], 0)
-                logger.log("error", f"Failed to add {new_pokemon['name']} to collection. Status rolled back.")
+            award()
         else:
-            db.set_monthly_challenge_state(new_pokemon["individual_id"], 2)
+            db.set_monthly_challenge_state(challenge_individual_id, 2)
+            events.emit("monthly_challenge", decision="rejected", individual_id=challenge_individual_id)
             show_monthly_rejection_dialog(parent_window=mw, challenge_pokemon=new_pokemon)
             logger.log("info", f"User rejected {new_pokemon['name']}{shiny_text}.")
 
@@ -876,6 +923,8 @@ def check_and_award_monthly_pokemon(logger, defer=True):
         db = services.db
         if db.get_user_data("rate_this") not in (True, "true"):
             logger.log("info", "Monthly Pokemon check skipped: user has not rated the addon.")
+            if reclaim:
+                services.ui.notify("info", "Please rate the addon before claiming a monthly challenge Pokémon.")
             return
         # Captured on the main thread before the worker starts, so the
         # callback can tell whether the database was switched or the profile
@@ -883,36 +932,54 @@ def check_and_award_monthly_pokemon(logger, defer=True):
         # collection object is what marks a profile session.
         db_token = db.identity_token()
         col = mw.col
+        if col is None:
+            return
     except Exception as e:
         logger.log("error", f"An unexpected error occurred while starting the monthly check: {e}")
         return
 
-    logger.log("info", "Checking for monthly challenge Pokemon award.")
-    now = datetime.now()
-    month_names = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
-    current_month_str = f"{month_names[now.month - 1]} {now.year}"
+    pending = getattr(services, "_monthly_challenge_request", None)
+    if pending is not None and pending[0] is db and pending[1] == db_token and pending[2] is col:
+        return
+    # Registry storage survives module reloads. Identity-based cleanup keeps
+    # an old completion from releasing a newer session's pending request.
+    request = (db, db_token, col)
+    services._monthly_challenge_request = request
+
+    def release():
+        if getattr(services, "_monthly_challenge_request", None) is request:
+            services._monthly_challenge_request = None
 
     def _complete(result_data):
         try:
             _process_on_main_thread(result_data, db, db_token, col, current_month_str)
         except Exception as e:
             logger.log("error", f"Error completing monthly check: {e}")
+        finally:
+            release()
 
-    # Let Anki own the worker and invoke the completion callback on the GUI thread.
-    if defer:
-        def on_done(future):
-            """Handle the task-manager result on Anki's GUI thread."""
-            try:
-                result_data = future.result()
-            except Exception as e:
-                logger.log("error", f"Error completing monthly check: {e}")
-                return
-            _complete(result_data)
+    try:
+        logger.log("info", "Checking for monthly challenge Pokemon award.")
+        now = datetime.now()
+        month_names = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        current_month_str = f"{month_names[now.month - 1]} {now.year}"
+        if defer:
+            def on_done(future):
+                try:
+                    result_data = future.result()
+                except Exception as e:
+                    release()
+                    logger.log("error", f"Error completing monthly check: {e}")
+                    return
+                _complete(result_data)
 
-        mw.taskman.run_in_background(lambda: _fetch_monthly_data(current_month_str), on_done)
-    else:
-        # Non-deferred: run everything on the calling thread (for tests)
-        _complete(_fetch_monthly_data(current_month_str))
+            mw.taskman.run_in_background(lambda: _fetch_monthly_data(current_month_str), on_done)
+        else:
+            _complete(_fetch_monthly_data(current_month_str))
+    except Exception as e:
+        release()
+        logger.log("error", f"Error starting monthly check: {e}")
+
 
 def parse_to_canonical(code_str):
     if not code_str:
