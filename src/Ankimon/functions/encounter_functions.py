@@ -31,6 +31,7 @@ from ..functions.pokedex_functions import (
     get_base_experience,
     get_effort_values,
     get_growth_rate,
+    get_pokemon_diff_lang_name,
     get_pretty_name_for_name,
     return_name_for_id,
     safe_int,
@@ -44,6 +45,7 @@ from ..pyobj.error_handler import show_warning_with_traceback
 from ..functions.trainer_functions import xp_share_gain_exp
 from ..functions.badges_functions import check_for_badge, receive_badge
 from ..functions.drawing_utils import tooltipWithColour
+from ..move_names import format_move_name
 from ..utils import (
     get_ev_spread,
     is_alive,
@@ -80,6 +82,34 @@ settings_obj = None
 translator = None
 ankimon_db = None
 pokemon_pc = None
+RARE_ENCOUNTER_TIERS = frozenset(
+    {"Starter", "Ultra", "Gmax", "Legendary", "Mega", "Mythical"}
+)
+
+
+def _disp_name(pokemon) -> str:
+    """Localized display name for a PokemonObject, with an English fallback."""
+    return getattr(pokemon, "display_name", None) or get_pretty_name_for_name(
+        getattr(pokemon, "name", "")
+    )
+
+
+def _lang_id() -> int:
+    try:
+        return int(services.settings.get("misc.language", 9))
+    except Exception:
+        return 9
+
+
+def _evo_display_name(evo_id, fallback: str) -> str:
+    """Localized name for an evolution target id; ``fallback`` if unavailable."""
+    try:
+        name = get_pokemon_diff_lang_name(int(evo_id), _lang_id())
+        if name and name != "No Translation in this language":
+            return name
+    except Exception:
+        pass
+    return fallback
 
 
 ALL_NATURES = [
@@ -465,18 +495,23 @@ def _modify_percentages_overhaul(
     return percentages
 
 
-def modify_percentages(total_reviews, daily_average, trainer_level):
+def modify_percentages(total_reviews, daily_average, trainer_level, *, main_level=None):
     """
     Modify Pokémon encounter percentages based on total reviews, trainer level, and main Pokémon level.
 
     Thin dispatcher: routes to the overhaul or legacy calculation based on the
     active system flag. The simulator (F23) calls the ``_modify_percentages_*``
     helpers directly with injected state, so it never has to flip this module's
-    ``USE_OVERHAUL_ENCOUNTER_SYSTEM`` global.
+    ``USE_OVERHAUL_ENCOUNTER_SYSTEM`` global. ``main_level`` is forwarded to the
+    helpers' injection hook; ``None`` keeps the live ``main_pokemon`` global.
     """
     if USE_OVERHAUL_ENCOUNTER_SYSTEM:
-        return _modify_percentages_overhaul(total_reviews, daily_average, trainer_level)
-    return _modify_percentages_legacy(total_reviews, daily_average, trainer_level)
+        return _modify_percentages_overhaul(
+            total_reviews, daily_average, trainer_level, main_level=main_level
+        )
+    return _modify_percentages_legacy(
+        total_reviews, daily_average, trainer_level, main_level=main_level
+    )
 
 
 def _modify_percentages_legacy(
@@ -659,7 +694,7 @@ def _meets_prerequisites(pokemon_id: int, collected_ids: set) -> bool:
     return required.issubset(collected_ids)
 
 
-def get_tier(total_reviews, trainer_level=1, event_modifier=None):
+def get_tier(total_reviews, trainer_level=1, event_modifier=None, *, main_level=None):
     """_summary_
     Randomly picks the tier for a new enemy Pokemon to be generated from, based on weighted probabilities based on number of reviews and trainer level.
 
@@ -667,12 +702,16 @@ def get_tier(total_reviews, trainer_level=1, event_modifier=None):
         total_reviews (int): Number of reviews done in that Anki session.
         trainer_level (int, optional): Trainer XP level. Defaults to 1.
         event_modifier (?, optional): Unused argument. Defaults to None.
+        main_level (int, optional): Main-Pokémon level for the tier gates. ``None``
+            uses the live ``main_pokemon`` global (desktop play).
 
     Returns:
         choice[0]: The first choice of TIER picked randomly (by a random.choices function)
     """
     daily_average = int(settings_obj.get("battle.daily_average"))
-    percentages = modify_percentages(total_reviews, daily_average, trainer_level)
+    percentages = modify_percentages(
+        total_reviews, daily_average, trainer_level, main_level=main_level
+    )
 
     tiers = list(percentages.keys())
     probabilities = list(percentages.values())
@@ -838,7 +877,12 @@ def get_all_pokemon_in_tier(tier: str) -> list[int]:
 
 
 def generate_random_pokemon(
-    main_pokemon_level: int, ankimon_tracker_obj: AnkimonTracker, *args, **kwargs
+    main_pokemon_level: int,
+    ankimon_tracker_obj: AnkimonTracker,
+    *args,
+    trainer_level: Optional[int] = None,
+    main_level: Optional[int] = None,
+    **kwargs,
 ):
     """
     Generates a random wild Pokémon with attributes scaled to the level of the player's main Pokémon.
@@ -853,6 +897,11 @@ def generate_random_pokemon(
             the generated wild Pokémon.
         ankimon_tracker_obj (AnkimonTracker): An object used to track battle state, such as the number
             of Pokémon encountered and cards used in the battle.
+        trainer_level / main_level (int, optional): Explicit trainer-card and
+            main-Pokémon levels for the tier roll. ``None`` reads the bound
+            ``trainer_card`` / ``main_pokemon`` globals (desktop play). Callers
+            running off the live singletons (mobile sync) pass them explicitly
+            instead of mutating this module's globals.
 
     Returns:
         tuple: A tuple containing the following elements:
@@ -913,7 +962,11 @@ def generate_random_pokemon(
     selected_tier = None
 
     # 1. Select the initial tier based on probabilities
-    initial_tier = get_tier(ankimon_tracker_obj.get_total_reviews(), trainer_card.level)
+    if trainer_level is None:
+        trainer_level = trainer_card.level if trainer_card is not None else 1
+    initial_tier = get_tier(
+        ankimon_tracker_obj.get_total_reviews(), trainer_level, main_level=main_level
+    )
 
     # Find starting point in fallback order
     try:
@@ -1257,6 +1310,13 @@ def new_pokemon(
     pokemon.hp = max_hp
     pokemon.max_hp = max_hp
 
+    # A successful manual choice settles its faint before reaching here. Any
+    # deferral still pending belongs to the encounter this one replaces.
+    from ..battle_loop import _cancel_main_faint_deferral
+
+    _cancel_main_faint_deferral()
+    pokemon._ankimon_encounter_token = object()
+
     ankimon_tracker.randomize_battle_scene()
     if test_window is not None:
         try:
@@ -1298,6 +1358,21 @@ def new_pokemon(
     # Anki and is a recorded no-op headless.
     if update_hud and reviewer_obj is not None:
         reviewer_obj.refresh_hud()
+
+    # Encounter tiers are names, not numeric ranks.
+    # Show a popup message for rare/shiny Pokemon if the setting is enabled
+    if not _in_bulk_resolve() and settings_obj.get("gui.pop_up_dialog_message_on_encounter") is True:
+        if pokemon.shiny or pokemon.tier in RARE_ENCOUNTER_TIERS:
+            if pokemon.shiny:
+                msg = f"A Shiny wild {get_pretty_name_for_name(pokemon.name)} appeared!"
+            else:
+                msg = f"A rare wild {get_pretty_name_for_name(pokemon.name)} appeared!"
+
+            try:
+                if services.logger:
+                    services.logger.log_and_showinfo("info", msg)
+            except Exception:
+                pass
 
     return pokemon
 
@@ -1409,6 +1484,7 @@ def save_main_pokemon_progress(
             )
         )
         main_pokemon.level += 1
+        main_pokemon.update_stats()
         events.emit("levelup", pokemon=main_pokemon.name, level=main_pokemon.level)
         msg = ""
         msg += f"Your {main_pokemon.name} is now level {main_pokemon.level} !"
@@ -1438,15 +1514,15 @@ def save_main_pokemon_progress(
                     msg = ""
                     msg += translator.translate(
                         "mainpokemon_can_learn_new_attack",
-                        main_pokemon_name=main_pokemon.name.capitalize(),
+                        main_pokemon_name=_disp_name(main_pokemon),
                     )
                 for new_attack in new_attacks:
                     if len(attacks) < 4 and new_attack not in attacks:
                         attacks.append(new_attack)
                         msg += translator.translate(
                             "mainpokemon_learned_new_attack",
-                            new_attack_name=new_attack,
-                            main_pokemon_name=main_pokemon.name.capitalize(),
+                            new_attack_name=format_move_name(new_attack),
+                            main_pokemon_name=_disp_name(main_pokemon),
                         )
                         color = "#6A4DAC"
                         if not _in_bulk_resolve():
@@ -1529,8 +1605,8 @@ def save_main_pokemon_progress(
                     "info",
                     translator.translate(
                         "pokemon_about_to_evolve",
-                        main_pokemon_name=main_pokemon.name,
-                        evo_pokemon_name=evo_display_name,
+                        main_pokemon_name=_disp_name(main_pokemon),
+                        evo_pokemon_name=_evo_display_name(evo_id, evo_display_name),
                         main_pokemon_level=main_pokemon.level,
                     ),
                 )
@@ -1545,7 +1621,7 @@ def save_main_pokemon_progress(
     msg = ""
     msg += translator.translate(
         "mainpokemon_gained_xp",
-        main_pokemon_name=main_pokemon.name,
+        main_pokemon_name=_disp_name(main_pokemon),
         exp=exp,
         experience_till_next_level=experience_till_next_level,
         main_pokemon_xp=main_pokemon.xp,
@@ -1559,7 +1635,6 @@ def save_main_pokemon_progress(
     # Load existing Pokémon data if it exists
     if main_pokemon_data:
         mainpkmndata = main_pokemon_data
-        mainpkmndata["stats"] = main_pokemon.stats
         mainpkmndata["xp"] = int(main_pokemon.xp)
         mainpkmndata["level"] = int(main_pokemon.level)
         # Clone raw EV yield to avoid mutating the in-memory enemy template
@@ -1614,11 +1689,18 @@ def save_main_pokemon_progress(
         main_pokemon.ev["spd"] += ev_yield["special-defense"]
         main_pokemon.ev["spe"] += ev_yield["speed"]
         main_pokemon.invalidate_cp_cache()
+        # Include this defeat's EVs, even when no level was gained. Keep the
+        # cached HP used by battles/HUD and the saved stats in sync.
+        main_pokemon.update_stats()
+        mainpkmndata["stats"] = main_pokemon.stats
         mainpkmndata["current_hp"] = int(main_pokemon.hp)
         # Friendship is uncapped — it keeps climbing past MAX_FRIENDSHIP (400) so
         # players can flex a super-bonded Pokémon. The progress bar still fills at
         # MAX_FRIENDSHIP; the raw number above it is what keeps growing.
-        main_pokemon.friendship += random.randint(5, 9)
+        friendship_gain = random.randint(5, 9)
+        if getattr(main_pokemon, "held_item", None) == "soothe-bell":
+            friendship_gain = int(friendship_gain * 1.5)
+        main_pokemon.friendship += friendship_gain
         mainpkmndata["friendship"] = main_pokemon.friendship
         # Skip the friendship-evolution offer when the evo window is dead/None
         # (F31 lazy singletons can leave services.evo_window None):
@@ -1676,8 +1758,8 @@ def save_main_pokemon_progress(
                         "info",
                         translator.translate(
                             "pokemon_about_to_evolve_friendship",
-                            main_pokemon_name=main_pokemon.name,
-                            evo_pokemon_name=friendship_evo_name,
+                            main_pokemon_name=_disp_name(main_pokemon),
+                            evo_pokemon_name=_evo_display_name(friendship_evo_id, friendship_evo_name),
                         ),
                     )
         mainpkmndata["pokemon_defeated"] = main_pokemon.pokemon_defeated
@@ -1744,15 +1826,18 @@ def kill_pokemon(
     # Ensure exp is at least 1 and round up if it's a decimal
     exp = max(1, math.ceil(exp))
 
-    # Handle XP share logic
+    # Handle XP share logic. "oras" mode applies to the whole active team
+    # automatically (no holder to pick), so it must run even when
+    # trainer.xp_share (the classic-mode holder) was never set.
     xp_share_individual_id = settings_obj.get("trainer.xp_share")
-    if xp_share_individual_id:
+    xp_share_mode = settings_obj.get("trainer.xp_share_mode", "classic")
+    if xp_share_individual_id or xp_share_mode == "oras":
         try:
             exp = xp_share_gain_exp(
                 logger,
                 settings_obj,
                 evo_window,
-                main_pokemon.id,
+                main_pokemon.individual_id,
                 exp,
                 xp_share_individual_id,
             )
@@ -1760,9 +1845,14 @@ def kill_pokemon(
             # xp_share_gain_exp's evolution check calls evo_window.ask_pokemon_evo(...)
             # unguarded; a dead/None window (F31 lazy singletons) can raise here.
             # Never let the XP-share side quest abort the main Pokemon's own
-            # progress persistence below — fall back to the standard 50% share.
+            # progress persistence below.
             services.logger.log("error", f"XP-share evolution check failed: {e}")
-            exp = int(exp * 0.5)
+            if xp_share_mode != "oras":
+                # Classic mode still owes the active Pokémon its half —
+                # xp_share_gain_exp never got to return it.
+                exp = int(exp * 0.5)
+            # ORAS mode doesn't reduce the active Pokémon at all, so on
+            # failure it just keeps its full, already-calculated `exp`.
 
     msg = ""
 
@@ -1898,7 +1988,9 @@ def catch_pokemon(
 
     msg = translator.translate(
         "caught_wild_pokemon",
-        enemy_pokemon_name=get_pretty_name_for_name(enemy_pokemon.name),
+        enemy_pokemon_name=getattr(
+            enemy_pokemon, "display_name", get_pretty_name_for_name(enemy_pokemon.name)
+        ),
     )
 
     if settings_obj.get("gui.pop_up_dialog_message_on_defeat") is True:
@@ -1909,6 +2001,12 @@ def catch_pokemon(
 
     color = "#a17cf7"  # 6A4DAC" #pokemon leveling info color for tooltip
     try:
+        # Tooltip only. A show_in_ankimon_window(msg) here is dead on both
+        # paths: every auto branch calls new_pokemon() on the next statement,
+        # whose display_first_encounter() overwrites last_message_text with
+        # "A wild Y appeared!" before a single frame is painted, and the
+        # manual path has already switched the window to the death view, which
+        # show_in_ankimon_window() no-ops on.
         tooltipWithColour(msg, color)
     except Exception as e:
         if logger is not None:
@@ -1957,10 +2055,18 @@ def handle_enemy_faint(
     achievements: dict,
 ):
     """
-    Handles what automatically happens when the enemy Pokémon faints, based on auto-battle settings and user overrides.
+    Handles what automatically happens when the enemy Pokémon faints, based
+    on auto-battle settings and user overrides.
+
+    Returns True when this call replaced ``enemy_pokemon`` with a fresh wild
+    encounter (via new_pokemon(), which already painted that encounter's own
+    intro frame) — callers use this to skip a same-turn repaint that would
+    otherwise immediately overwrite the fresh intro with stale battle-log
+    text describing the fight that just ended. False/None otherwise (already
+    processed this turn, or manual mode showing the death/catch screen).
     """
     if ankimon_tracker_obj.faint_processed:
-        return
+        return False
 
     events.emit("faint", who="enemy", pokemon=enemy_pokemon.name, id=enemy_pokemon.id)
 
@@ -1987,7 +2093,7 @@ def handle_enemy_faint(
             ankimon_tracker_obj.general_card_count_for_battle = 0
         finally:
             clear_auto_battle_override()
-        return
+        return True
 
     elif _auto_battle_override == "defeat":
         # Override: Force defeat, unless the enemy is protected by an
@@ -2020,7 +2126,7 @@ def handle_enemy_faint(
             ankimon_tracker_obj.general_card_count_for_battle = 0
         finally:
             clear_auto_battle_override()
-        return
+        return True
     # --- END OVERRIDE CHECK ---
 
     # --- Wishlist fast-path (runs after override check) ---
@@ -2038,7 +2144,7 @@ def handle_enemy_faint(
         new_pokemon(enemy_pokemon, test_window, ankimon_tracker_obj, reviewer_obj)
         main_pokemon.reset_bonuses()
         ankimon_tracker_obj.general_card_count_for_battle = 0
-        return
+        return True
     # --- End wishlist fast-path ---
 
     # The "always auto-catch this tier" safety net is only needed by the
@@ -2049,6 +2155,9 @@ def handle_enemy_faint(
     should_catch_always = _enemy_protected_by_auto_catch(enemy_pokemon)
 
     # --- Normal auto-battle logic (no override) ---
+    # Every branch below except the manual-mode else calls new_pokemon(),
+    # so default to True and only the else overrides it.
+    replaced_encounter = True
     if auto_battle_setting == 3:  # Catch if uncollected
         enemy_id = enemy_pokemon.id
         # Check cache instead of file
@@ -2123,6 +2232,7 @@ def handle_enemy_faint(
                 test_window.display_pokemon_death()
             except RuntimeError:
                 pass
+        replaced_encounter = False
 
     main_pokemon.reset_bonuses()
     ankimon_tracker_obj.general_card_count_for_battle = 0
@@ -2130,6 +2240,7 @@ def handle_enemy_faint(
     # already called new_pokemon() (which clears it as its first statement) or
     # is the manual-mode branch, which already cleared it earlier in this
     # function when auto_battle_setting == 0 was detected.
+    return replaced_encounter
 
 
 def handle_main_pokemon_faint(
@@ -2138,12 +2249,21 @@ def handle_main_pokemon_faint(
     test_window: TestWindow,
     reviewer_obj: Reviewer_Manager,
     translator: Translator,
+    spawn_replacement: bool = True,
 ):
     """
     Handles what happens when the main Pokémon faints.
+
+    ``spawn_replacement`` is False only for the deferred manual-mode double
+    faint: there the enemy also fainted the same turn, its catch/defeat screen
+    is still open, and the player's answer to it runs ``new_pokemon()`` itself.
+    Calling it here as well would stack a second fresh encounter on top of that
+    one, so this path does just the faint bookkeeping (heal + reset).
     """
     msg = translator.translate(
-        "pokemon_fainted", enemy_pokemon_name=main_pokemon.name.capitalize()
+        "own_pokemon_fainted",
+        main_pokemon_name=get_pretty_name_for_name(main_pokemon.name),
+        enemy_pokemon_name=get_pretty_name_for_name(enemy_pokemon.name)
     )
     tooltipWithColour(msg, "#E12939")
     events.emit("faint", who="main", pokemon=main_pokemon.name)
@@ -2153,6 +2273,33 @@ def handle_main_pokemon_faint(
     main_pokemon.current_hp = main_pokemon.max_hp
     main_pokemon.reset_bonuses()
 
-    new_pokemon(
-        enemy_pokemon, test_window, ankimon_tracker_obj, reviewer_obj
-    )  # Show a new random Pokémon
+    # Patch the stored row. Saving the live object would replace that row with
+    # to_dict(), whose attacks stay stale after a level-up (the new move is
+    # written only onto the DB dict), and save_main_pokemon() would force
+    # is_main=1 even when this row is not the saved main.
+    db = services.db
+    individual_id = getattr(main_pokemon, "individual_id", None)
+    stored = (
+        db.get_pokemon(individual_id)
+        if db is not None and individual_id is not None
+        else None
+    )
+    if stored:
+        healed = int(main_pokemon.max_hp)
+        stored["hp"] = healed
+        stored["current_hp"] = healed
+        main_row = db.get_main_pokemon()
+        same_main = (
+            main_row is not None
+            and main_row.get("individual_id") is not None
+            and str(main_row.get("individual_id")) == str(individual_id)
+        )
+        if same_main:
+            db.save_main_pokemon(stored)
+        else:
+            db.save_pokemon(stored)
+
+    if spawn_replacement:
+        new_pokemon(
+            enemy_pokemon, test_window, ankimon_tracker_obj, reviewer_obj
+        )  # Show a new random Pokémon

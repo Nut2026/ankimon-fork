@@ -76,7 +76,10 @@ def cycle_team_pokemon():
     global _team_cycle_index, _team_cycle_pokemon_ids
 
     try:
-        from .functions.update_main_pokemon import save_main_pokemon
+        from .functions.update_main_pokemon import (
+            _apply_loaded_hp,
+            save_main_pokemon,
+        )
 
         cycle_count = _team_cycle_count()
         if cycle_count <= 1:
@@ -128,9 +131,18 @@ def cycle_team_pokemon():
                 return
             pokemon_data["base_stats"] = base_stats
 
+            # The mutable main singleton is about to represent another
+            # individual. The pending faint belongs to the previous one.
+            from .battle_loop import _cancel_main_faint_deferral
+
+            _cancel_main_faint_deferral()
             main_pokemon.update_stats(**pokemon_data)
-            main_pokemon.max_hp = main_pokemon.calculate_max_hp()
-            main_pokemon.hp = main_pokemon.max_hp
+            # update_stats only overwrites the HP keys the incoming row carries,
+            # so hp/current_hp can still hold the outgoing Pokemon's values.
+            # Resolve HP from the incoming row like the launch-time loader does
+            # (current_hp, then hp, then max HP) and write it to both fields;
+            # this also recalculates max_hp.
+            _apply_loaded_hp(main_pokemon, pokemon_data)
             main_pokemon.reset_bonuses()
 
             save_main_pokemon(main_pokemon)
@@ -147,7 +159,38 @@ def cycle_team_pokemon():
 
         pkmn_name = pokemon_data.get("nickname") or pokemon_data.get("name", "Unknown")
         pkmn_level = pokemon_data.get("level", "?")
-        tooltip(f"Switched to {pkmn_name}! LVL: {pkmn_level}")
+        # main_pokemon now holds the switched-in Pokémon (update_stats above), so
+        # its display_name gives the localized species / regional-form name and
+        # honours a genuinely custom nickname.
+        display_name = getattr(main_pokemon, "display_name", None) or pkmn_name
+        try:
+            switch_msg = services.translator.translate(
+                "switched_pokemon", pokemon_name=display_name, level=pkmn_level
+            )
+        except Exception:
+            switch_msg = f"Switched to {display_name}! Lv. {pkmn_level}"
+
+        # The HUD refresh above only repaints the bottom-of-reviewer bars —
+        # the separate Ankimon Window popup has its own sprite/name label and
+        # message box, and was never told a swap happened, so it kept showing
+        # the pokemon (and battle text) from before the cycle. Routes the
+        # switch message into the window's own message box rather than
+        # leaving it to the floating Anki tooltip below — with the window
+        # open the two used to visually overlap/compete for the same
+        # on-screen space.
+        shown_in_window = False
+        try:
+            from .functions.drawing_utils import show_in_ankimon_window
+
+            shown_in_window = show_in_ankimon_window(switch_msg)
+        except Exception as e:
+            print(f"Error updating Ankimon Window: {e}")
+
+        # Only float the tooltip when the window did NOT take the message —
+        # otherwise the same sentence appears twice at once, which is the
+        # overlap show_in_ankimon_window() exists to remove.
+        if not shown_in_window:
+            tooltip(switch_msg)
 
     except Exception as e:
         print(f"Unexpected error: {e}")
@@ -164,21 +207,9 @@ def set_collected_ids(ids):
 
 def catch_shortcut_function():
     if enemy_pokemon.hp < 1:
-        catch_pokemon(
-            enemy_pokemon,
-            ankimon_tracker_obj,
-            logger,
-            "",
-            _collected_pokemon_ids,
-            achievements,
-        )
-        new_pokemon(
-            enemy_pokemon,
-            get_test_window(),
-            ankimon_tracker_obj,
-            reviewer_obj,
-            update_hud=True,
-        )
+        from .hook_registry import CatchPokemonHook
+
+        CatchPokemonHook(_collected_pokemon_ids)
     else:
         if get_auto_battle_setting(services.settings) == 0:
             # Auto-battle disabled - show the original message
@@ -190,21 +221,9 @@ def catch_shortcut_function():
 
 def defeat_shortcut_function():
     if enemy_pokemon.hp < 1:
-        kill_pokemon(
-            main_pokemon,
-            enemy_pokemon,
-            get_evo_window(),
-            logger,
-            achievements,
-            trainer_card,
-        )
-        new_pokemon(
-            enemy_pokemon,
-            get_test_window(),
-            ankimon_tracker_obj,
-            reviewer_obj,
-            update_hud=True,
-        )
+        from .hook_registry import DefeatPokemonHook
+
+        DefeatPokemonHook()
     else:
         if get_auto_battle_setting(services.settings) == 0:
             # Auto-battle disabled - show the original message

@@ -20,7 +20,13 @@ from aqt.qt import (
     QTextBrowser,
     QCheckBox,
 )
+
 from aqt.theme import theme_manager
+
+try:
+    from aqt.qt import QIcon
+except ImportError:
+    from PyQt6.QtGui import QIcon
 
 from .update_manager import (
     fetch_releases,
@@ -28,6 +34,9 @@ from .update_manager import (
     fetch_branches,
     fetch_open_prs,
     apply_update,
+    is_git_clone,
+    get_git_checkout_info,
+    git_checkout_source,
     _download_zip_to_temp,
     _download_branch_zip,
     _download_pr_zip,
@@ -36,18 +45,190 @@ from .update_manager import (
     published_at_for_tag,
     stamp_addon_mod,
 )
+
 from ..resources import addon_ver, IS_EXPERIMENTAL_BUILD
+from ..services import services
+
+try:
+    from ..resources import icon_path
+except ImportError:
+    icon_path = None
 
 
 def _start_query_op(parent, op, success, failure):
     try:
-        QueryOp(
-            parent=parent, op=op, success=success
-        ).failure(failure).without_collection().run_in_background()
+        QueryOp(parent=parent, op=op, success=success).failure(
+            failure
+        ).without_collection().run_in_background()
     except Exception as exc:
         # Submission happens on the Qt thread, so synchronous failures can use
         # the same UI-safe cleanup callback as background worker failures.
         failure(exc)
+
+
+import re
+from html import escape as _escape
+
+
+def _format_inline(text: str) -> str:
+    """
+    Apply inline formatting (bold, italic, strikethrough) to text.
+    """
+
+    text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
+    text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)
+
+    return text
+
+
+def markdown_to_html(text: str) -> str:
+    """
+    Convert basic Markdown to clean HTML for display in QTextBrowser.
+    Preserves all line breaks from the original text while cleaning formatting.
+    Makes all links clickable - both [text](url) format and plain URLs.
+    Truncates content right before the "Download:" line (handles bold formatting).
+    """
+    if not text:
+        return ""
+
+    text = _escape(text)
+
+    # Look for patterns like "Download:", "**Download:**", "**Download**:", etc.
+    download_match = re.search(
+        r"(?im)^\s*(?:\*{1,3})?Download(?:\*{1,3})?:",
+        text,
+    )
+    if download_match:
+        text = text[: download_match.start()]
+        text = text.rstrip()
+
+    # Keep generated links opaque until all Markdown formatting is complete.
+    # Input (including URL quotes and ampersands) has already been escaped once.
+    links = []
+    link_prefix = "\x00ankimon-link:"
+    while link_prefix in text:
+        link_prefix += ":"
+
+    def store_link(url, label):
+        token = f"{link_prefix}{len(links)}\x00"
+        links.append(f'<a href="{url}">{label}</a>')
+        return token
+
+    def fix_markdown_link(match):
+        """
+        Handle Markdown links: [text](url) - convert to HTML links
+        """
+        text_content = match.group(1)
+        url = match.group(2)
+        # Only allow http/https schemes for security
+        if not re.match(r"https?://", url, re.IGNORECASE):
+            return match.group(0)
+        return store_link(url, _format_inline(text_content))
+
+    text = re.sub(r"\[(.*?)\]\((.*?)\)", fix_markdown_link, text)
+
+    def fix_plain_url(match):
+        """
+        Handle plain URLs - convert to clickable links
+        """
+        url = match.group(0)
+        if not re.match(r"https?://", url, re.IGNORECASE):
+            return url
+        return store_link(url, url)
+
+    # Markdown links are placeholders, so plain URL matching cannot relink them.
+    url_pattern = r'https?://[^\s<>"\'()\x00]+'
+    text = re.sub(url_pattern, fix_plain_url, text)
+
+    lines = text.split("\n")
+    processed_lines = []
+
+    for line in lines:
+        stripped = line.rstrip()
+
+        if not stripped:
+            processed_lines.append("")
+            continue
+
+        # Headers
+        if re.match(r"^###\s+", stripped):
+            content = re.sub(r"^###\s+", "", stripped)
+            processed_lines.append(f"<b>{_format_inline(content)}</b>")
+            continue
+        elif re.match(r"^##\s+", stripped):
+            content = re.sub(r"^##\s+", "", stripped)
+            processed_lines.append(f"<b>{_format_inline(content)}</b>")
+            continue
+        elif re.match(r"^#\s+", stripped):
+            content = re.sub(r"^#\s+", "", stripped)
+            processed_lines.append(f"<b>{_format_inline(content)}</b>")
+            continue
+
+        # Horizontal rules
+        if stripped in ["---", "___", "***"]:
+            processed_lines.append(
+                '<hr style="border: none; border-top: 1px solid #444; margin: 4px 0;">'
+            )
+            continue
+
+        # Bullet points
+        bullet_match = re.match(r"^[-*•]\s+(.*)$", stripped)
+        if bullet_match:
+            content = bullet_match.group(1)
+            # Apply inline formatting to bullet content
+            content = _format_inline(content)
+            # Bold any "feat:" or "fix:" labels
+            content = re.sub(
+                r"(feat\([^)]*\)|fix\([^)]*\)|add\([^)]*\)|update\([^)]*\)):",
+                r"<b>\1:</b>",
+                content,
+            )
+            processed_lines.append(f"• {content}")
+            continue
+
+        # Regular text
+        line_text = _format_inline(stripped)
+
+        processed_lines.append(line_text)
+
+    html = "\n".join(processed_lines)
+
+    lines = html.split("\n")
+    collapsed_lines = []
+    prev_empty = False
+    for line in lines:
+        if line == "":
+            if not prev_empty:
+                collapsed_lines.append("")
+                prev_empty = True
+        else:
+            collapsed_lines.append(line)
+            prev_empty = False
+    html = "\n".join(collapsed_lines)
+
+    html = html.replace("\n\n", "<br><br>")
+    html = html.replace("\n", "<br>")
+
+    # Clean up excessive breaks - maximum of two consecutive <br> tags
+    html = re.sub(r"(<br>){3,}", "<br><br>", html)
+
+    def add_link_style(match):
+        """
+        Add styles to all links in the HTML - but only if they don't already have styles
+        """
+        href = match.group(1)
+        text_content = match.group(2)
+        # Check if style already exists
+        if "style=" in match.group(0):
+            return match.group(0)
+        return f'<a href="{href}" style="color: #1A73E8; text-decoration: none;">{text_content}</a>'
+
+    for index, link in enumerate(links):
+        html = html.replace(f"{link_prefix}{index}\x00", link)
+    html = re.sub(r'<a href="(.*?)">(.*?)</a>', add_link_style, html)
+
+    return html
 
 
 class UpdateDialog(QDialog):
@@ -68,6 +249,12 @@ class UpdateDialog(QDialog):
         self._close_finalized = False
         self._sprites_busy_token = None
         self.sprites_thread = None
+        self._git_clone = is_git_clone()
+        self._git_info = get_git_checkout_info() if self._git_clone else {}
+        # Canonical tip of the checked-out branch, learned by _load_data. Starts as
+        # "unknown": an empty string is truthy-safe but distinct from None.
+        self._git_remote_sha = "" if self._git_clone else None
+        self._git_ff_blocked = False
 
         self._apply_theme()
 
@@ -82,6 +269,8 @@ class UpdateDialog(QDialog):
         body.setContentsMargins(20, 16, 20, 16)
 
         body.addLayout(self._build_channel_row())
+        if self._git_clone:
+            body.addWidget(self._build_git_notice())
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_brrr_tab(), f"  Branch: {self.active_branch}  ")
@@ -90,9 +279,6 @@ class UpdateDialog(QDialog):
         self.tabs.addTab(self._build_sprites_tab(), "  Sprites  ")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         body.addWidget(self.tabs)
-
-        if select_tab == "sprites":
-            self.tabs.setCurrentIndex(3)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -108,8 +294,114 @@ class UpdateDialog(QDialog):
         self.status_label.setMinimumHeight(24)
         body.addWidget(self.status_label)
 
+        # Pre-select a tab only now: currentChanged is already wired, and landing
+        # on the Developer tab kicks off _load_dev_data() -> _begin_busy(), which
+        # needs progress_bar and status_label to exist.
+        if select_tab == "sprites":
+            self.tabs.setCurrentIndex(3)
+        elif self._git_clone:
+            self.tabs.setCurrentIndex(2)
+
         layout.addLayout(body)
         self._load_data()
+
+    def _git_banner_html(self) -> str:
+        import html
+
+        c = self._colors
+        info = self._git_info
+        branch = info.get("branch") or "unknown"
+        sha = info.get("sha") or "unknown"
+        display_branch = "detached checkout" if branch == "HEAD" else branch
+        state = "local changes" if info.get("dirty") else "clean"
+        state_color = c["warning"] if info.get("dirty") else c["success"]
+        # Branch names may legally contain <, > and &; QLabel renders rich text.
+        return (
+            f"<b>{html.escape(display_branch)}</b> · <code>{html.escape(sha)}</code> · "
+            f"<span style='color:{state_color}'><b>{state}</b></span><br>"
+            "Use the same Releases and Developer tabs below. Git fetches the "
+            "selected source from the Ankimon repository and checks it out "
+            "without resetting local branches."
+        )
+
+    def _git_pull_allowed(self) -> bool:
+        info = self._git_info
+        return (
+            bool(info.get("branch"))
+            and info.get("branch") != "HEAD"
+            and not info.get("dirty")
+            # "current" fetches the checked-out branch from the Ankimon repository;
+            # a local-only or fork branch can only fail. Unknown until _load_data
+            # has asked, so the button starts enabled and busy covers the wait.
+            and self._git_remote_sha is not None
+            # ...and the Branch tab's verdict: when the canonical branch is known
+            # to be behind or diverged a fast-forward cannot succeed either.
+            and not self._git_ff_blocked
+        )
+
+    def _apply_git_pull_state(self):
+        # Route through _set_action_enabled so _action_button_states records the
+        # intended state: _end_busy restores from that map, and a plain
+        # setEnabled() would let the button come back enabled after an update
+        # even on a detached or dirty checkout.
+        allowed = self._git_pull_allowed()
+        self._set_action_enabled(self.git_pull_btn, allowed)
+        self.git_pull_btn.setToolTip(
+            "Fast-forward the checked-out branch from the Ankimon repository."
+            if allowed
+            else "Unavailable while detached or while the checkout has local changes."
+        )
+
+    def _refresh_git_state(self):
+        """Re-read the checkout after a Git operation moved it and redraw
+        everything derived from it (banner, pull button, Branch tab)."""
+        self._git_info = get_git_checkout_info()
+        # Both describe a different branch now; _load_data re-asks.
+        self._git_remote_sha = None
+        self._git_ff_blocked = False
+        self._git_note.setText(self._git_banner_html())
+        self._apply_git_pull_state()
+        self._load_data()
+
+    def _build_git_notice(self):
+        c = self._colors
+
+        group = QGroupBox("Git Workspace Mode")
+        group.setStyleSheet(f"""
+            QGroupBox {{
+                background-color: {c["header_bg"]};
+                border: 2px solid {c["accent"]};
+                border-radius: 10px;
+                margin-top: 10px;
+                padding: 18px 12px 12px 12px;
+            }}
+            QGroupBox::title {{
+                color: {c["accent"]};
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                font-weight: bold;
+            }}
+        """)
+        row = QHBoxLayout(group)
+
+        self._git_note = QLabel(self._git_banner_html())
+        self._git_note.setWordWrap(True)
+        self._git_note.setStyleSheet(f"font-size: 11px; color: {c['text']};")
+        row.addWidget(self._git_note, 1)
+
+        self.git_pull_btn = QPushButton("Fast-forward Current Branch")
+        self._apply_git_pull_state()
+        self.git_pull_btn.clicked.connect(
+            lambda: self._run_update(
+                None,
+                "current Git branch",
+                source_type="current",
+                source_name="current",
+            )
+        )
+        row.addWidget(self.git_pull_btn)
+        return group
 
     def _build_channel_row(self):
         """A labeled dropdown to pick the auto-update channel (dialog-only UI).
@@ -143,6 +435,9 @@ class UpdateDialog(QDialog):
 
     @property
     def active_branch(self) -> str:
+        if self._git_clone:
+            branch = self._git_info.get("branch") or "main"
+            return "detached" if branch == "HEAD" else branch
         state = read_update_state()
         if state and state.get("source_type") == "branch":
             return state.get("source_name") or "main"
@@ -478,12 +773,69 @@ class UpdateDialog(QDialog):
         self.brrr_snooze_checkbox.blockSignals(False)
 
         # 5. Status & Update Button
-        if not remote_sha:
-            self.brrr_status_label.setText("Status:  Could not check connection.")
+        relation = state.get("git_relation") if self._git_clone else None
+        if self._git_clone:
+            # The banner's pull button runs the same fast-forward as this tab's
+            # button, so it follows the same verdict.
+            self._git_remote_sha = remote_sha
+            self._git_ff_blocked = relation in ("behind", "diverged")
+            self._apply_git_pull_state()
+        if self._git_clone and active == "detached":
+            self.brrr_status_label.setText(
+                "Status:  Detached checkout. Pick a branch, release, tag, or PR "
+                "from the other tabs."
+            )
+            self.brrr_status_label.setStyleSheet(
+                f"font-size: 13px; font-weight: bold; color: {c['warning']};"
+            )
+            self._set_action_enabled(self.brrr_update_btn, False)
+            self.brrr_update_btn.setText("No Branch Checked Out")
+        elif self._git_clone and self._git_info.get("dirty"):
+            # Same gate as the banner's pull button: both run the same
+            # fast-forward, and the backend refuses a dirty tree anyway.
+            self.brrr_status_label.setText(
+                "Status:  Local changes present. Commit, stash, or discard them "
+                "before updating."
+            )
+            self.brrr_status_label.setStyleSheet(
+                f"font-size: 13px; font-weight: bold; color: {c['warning']};"
+            )
+            self._set_action_enabled(self.brrr_update_btn, False)
+            self.brrr_update_btn.setText("Checkout Has Local Changes")
+        elif not remote_sha:
+            self.brrr_status_label.setText(
+                f"Status:  Branch '{active}' was not found on the Ankimon repository "
+                "(or it could not be reached)."
+                if self._git_clone
+                else "Status:  Could not check connection."
+            )
             self.brrr_status_label.setStyleSheet(
                 f"font-size: 13px; font-weight: bold; color: {c['error']};"
             )
             self._set_action_enabled(self.brrr_update_btn, False)
+            if self._git_clone:
+                self.brrr_update_btn.setText("Branch Not on Ankimon Repository")
+        elif (
+            self._git_clone
+            and local_sha != remote_sha
+            and relation in ("behind", "diverged")
+        ):
+            # A SHA mismatch is not an update when the local branch is the one
+            # that is ahead or has diverged: a fast-forward is impossible, so
+            # don't offer it. An UNKNOWN relation (rate limit, offline, a local
+            # commit GitHub has never seen) falls through and offers it instead:
+            # git_checkout_source proves ancestry before moving anything, and
+            # the UI must not state a reason it cannot know.
+            if relation == "behind":
+                why = f"Your checkout is ahead of '{active}' on the Ankimon repository."
+            else:
+                why = f"Your checkout has diverged from '{active}' on the Ankimon repository."
+            self.brrr_status_label.setText(f"Status:  {why}")
+            self.brrr_status_label.setStyleSheet(
+                f"font-size: 13px; font-weight: bold; color: {c['warning']};"
+            )
+            self._set_action_enabled(self.brrr_update_btn, False)
+            self.brrr_update_btn.setText("Cannot Fast-forward")
         elif local_sha != remote_sha:
             self.brrr_status_label.setText(
                 f"Status:  New Update Available! (Latest: {remote_sha[:7]})"
@@ -529,6 +881,16 @@ class UpdateDialog(QDialog):
 
     def _on_brrr_update_clicked(self):
         branch = self.active_branch
+        if self._git_clone:
+            if branch == "detached":
+                return
+            self._run_update(
+                None,
+                f"latest {branch}",
+                source_type="current",
+                source_name="current",
+            )
+            return
         self._run_update(
             lambda progress_cb: _download_branch_zip(branch, progress_cb),
             f"latest {branch}",
@@ -617,12 +979,16 @@ class UpdateDialog(QDialog):
         info.setWordWrap(True)
         layout.addWidget(info)
 
-        warning = QLabel(
-            "⚠ Do not use this if you installed Ankimon by cloning the git "
-            "repository. The updater overwrites files in place and would clobber "
-            "your checkout — update with 'git pull' instead. (Your Pokémon "
-            "data and sprites are always preserved.)"
+        warning_text = (
+            "Git workspace mode is active. Sources selected here are fetched from "
+            "the official Ankimon repository and checked out with Git; local "
+            "changes must be committed, stashed, or discarded first."
+            if self._git_clone
+            else "⚠ Pull requests and development branches may contain unreviewed code. "
+            "Only install sources you trust. Your Pokémon data and sprites are "
+            "preserved during archive-based updates."
         )
+        warning = QLabel(warning_text)
         warning.setStyleSheet(
             f"color: {c['warning']}; font-size: 11px; font-weight: bold;"
         )
@@ -702,11 +1068,14 @@ class UpdateDialog(QDialog):
         layout.addWidget(self.sprites_progress)
 
         self.sprites_snooze_checkbox = QCheckBox("Snooze these updates for 7 days")
-        self.sprites_snooze_checkbox.setStyleSheet(f"color: {c['muted']}; font-size: 11px;")
-        
+        self.sprites_snooze_checkbox.setStyleSheet(
+            f"color: {c['muted']}; font-size: 11px;"
+        )
+
         from ..resources import user_path_sprites
         import json
         import time
+
         dest_dir = Path(user_path_sprites)
         state_path = dest_dir.parent / "sprites_update_state.json"
         is_snoozed = False
@@ -714,11 +1083,16 @@ class UpdateDialog(QDialog):
             try:
                 state_data = json.loads(state_path.read_text(encoding="utf-8"))
                 snooze_until = state_data.get("snooze_until")
-                is_snoozed = isinstance(snooze_until, (int, float)) and time.time() < snooze_until
+                is_snoozed = (
+                    isinstance(snooze_until, (int, float))
+                    and time.time() < snooze_until
+                )
             except Exception:
                 pass
         self.sprites_snooze_checkbox.setChecked(is_snoozed)
-        self.sprites_snooze_checkbox.stateChanged.connect(self._on_sprites_snooze_changed)
+        self.sprites_snooze_checkbox.stateChanged.connect(
+            self._on_sprites_snooze_changed
+        )
         layout.addWidget(self.sprites_snooze_checkbox)
 
         btn_layout = QHBoxLayout()
@@ -741,21 +1115,22 @@ class UpdateDialog(QDialog):
         from ..resources import user_path_sprites
         import json
         import time
+
         dest_dir = Path(user_path_sprites)
         state_path = dest_dir.parent / "sprites_update_state.json"
-        
+
         state_data = {}
         if state_path.exists():
             try:
                 state_data = json.loads(state_path.read_text(encoding="utf-8"))
             except Exception:
                 pass
-                
+
         if self.sprites_snooze_checkbox.isChecked():
             state_data["snooze_until"] = time.time() + 7 * 24 * 60 * 60
         else:
             state_data["snooze_until"] = 0
-            
+
         try:
             state_path.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
         except Exception:
@@ -840,6 +1215,10 @@ class UpdateDialog(QDialog):
             completion_result = (success, message)
 
         def thread_stopped():
+            # The worker may have changed files even on cancellation or failure.
+            from ..functions.sprite_functions import _clear_sprite_cache
+
+            _clear_sprite_cache()
             closing = self._closing
             try:
                 if not closing and self.sprites_thread is thread:
@@ -985,6 +1364,7 @@ class UpdateDialog(QDialog):
                 fetch_branch_sha,
                 fetch_commit_date,
                 fetch_branch_commits,
+                fetch_branch_relation,
             )
 
             # 1. Fetch releases
@@ -994,10 +1374,18 @@ class UpdateDialog(QDialog):
             except Exception:
                 pass
 
-            # 2. Get local state
+            # 2. Get local state. update_state.json records archive installs;
+            # a Git checkout's truth is HEAD and the checked-out branch.
             state = read_update_state() or {}
-            local_sha = state.get("commit_sha")
-            branch = state.get("source_name") or "main"
+            if self._git_clone:
+                local_sha = self._git_info.get("full_sha") or None
+                branch = self.active_branch
+                if branch == "detached":
+                    branch = "main"
+                state = dict(state, commit_sha=local_sha)
+            else:
+                local_sha = state.get("commit_sha")
+                branch = state.get("source_name") or "main"
 
             # 3. Fetch remote branch details
             remote_sha = None
@@ -1005,6 +1393,13 @@ class UpdateDialog(QDialog):
                 remote_sha = fetch_branch_sha(branch)
             except Exception:
                 pass
+            if self._git_clone and local_sha and remote_sha and remote_sha != local_sha:
+                # Which side is ahead decides whether a fast-forward is even
+                # possible; the SHA comparison alone is direction-blind.
+                try:
+                    state["git_relation"] = fetch_branch_relation(local_sha, branch)
+                except Exception:
+                    state["git_relation"] = None
 
             local_commit_date = None
             if local_sha:
@@ -1076,9 +1471,7 @@ class UpdateDialog(QDialog):
 
         def on_failed(exc):
             if self._end_busy(busy_token):
-                self.status_label.setText(
-                    f"Could not load developer options: {exc}"
-                )
+                self.status_label.setText(f"Could not load developer options: {exc}")
 
         _start_query_op(self, bg, on_done, on_failed)
 
@@ -1122,14 +1515,19 @@ class UpdateDialog(QDialog):
     # --- Actions ---
 
     def _action_buttons(self):
-        return (
+        buttons = [
             self.brrr_update_btn,
             self.update_latest_btn,
             self.release_btn,
             self.dev_install_btn,
             self.sprites_check_btn,
             self.sprites_update_btn,
-        )
+        ]
+        # Only built in Git-checkout mode, so it must not be assumed present:
+        # _begin_busy() runs on every install, Git or not.
+        if hasattr(self, "git_pull_btn"):
+            buttons.append(self.git_pull_btn)
+        return tuple(buttons)
 
     def _set_action_enabled(self, button, enabled: bool):
         self._action_button_states[button] = enabled
@@ -1174,7 +1572,17 @@ class UpdateDialog(QDialog):
         published_at: str = None,
         extra_warning: str = None,
     ):
-        prompt = f"Update Ankimon to {label}?\n\nYour Pokemon data, settings, and sprites will be preserved."
+        if self._git_clone:
+            prompt = (
+                f"Switch this Git checkout to {label}?\n\n"
+                "Your local branches and commits will not be reset. The checkout "
+                "must be clean, and Anki must be restarted afterward."
+            )
+        else:
+            prompt = (
+                f"Update Ankimon to {label}?\n\n"
+                "Your Pokemon data, settings, and sprites will be preserved."
+            )
         if extra_warning:
             prompt = f"{extra_warning}\n\n{prompt}"
         confirm = QMessageBox.question(
@@ -1187,10 +1595,30 @@ class UpdateDialog(QDialog):
             return
 
         busy_token = self._begin_busy()
-        self.status_label.setText(f"Downloading {label}...")
+        self.status_label.setText(
+            f"Preparing Git checkout for {label}..."
+            if self._git_clone
+            else f"Downloading {label}..."
+        )
 
         def bg(_col):
             nonlocal commit_sha
+            messages = []
+
+            def status_update(m):
+                messages.append(m)
+                mw.taskman.run_on_main(lambda: self.status_label.setText(m))
+
+            if self._git_clone:
+                success, msg = git_checkout_source(
+                    source_type or "current",
+                    source_name,
+                    status_cb=status_update,
+                )
+                # 4-tuple to match on_done's unpack; a Git checkout stamps no
+                # pending addon mod, so pending_mod is None.
+                return success, msg, messages, None
+
             if source_type == "branch" and not commit_sha:
                 commit_sha = fetch_branch_sha(source_name)
 
@@ -1202,11 +1630,6 @@ class UpdateDialog(QDialog):
                     [],
                     None,
                 )
-            messages = []
-
-            def status_update(m):
-                messages.append(m)
-                mw.taskman.run_on_main(lambda: self.status_label.setText(m))
 
             success, msg, pending_mod = apply_update(
                 zip_path,
@@ -1233,6 +1656,10 @@ class UpdateDialog(QDialog):
             if self._end_busy(busy_token):
                 self.status_label.setText(messages[-1] if messages else msg)
                 self.progress_bar.setValue(100 if success else 0)
+            if success and self._git_clone:
+                # HEAD moved: the banner, pull button and Branch tab all describe
+                # the checkout and must not keep showing the pre-checkout state.
+                self._refresh_git_state()
             if success:
                 QMessageBox.information(
                     self,
@@ -1330,9 +1757,7 @@ class UpdateDialog(QDialog):
                     # installs byte-identical code to the Releases tab. Date it
                     # the same way, or the tag's (earlier) commit timestamp lets
                     # the AnkiWeb upload look newer than the code just installed.
-                    published_at=published_at_for_tag(
-                        data["name"], self._releases
-                    ),
+                    published_at=published_at_for_tag(data["name"], self._releases),
                 )
 
 
@@ -1480,7 +1905,15 @@ class BranchUpdatePromptDialog(QDialog):
 
 
 class BranchUpdateProgressDialog(QDialog):
-    def __init__(self, branch_name: str, remote_sha: str, parent=None, release: dict = None):
+    """Show update progress and offer the appropriate completion action."""
+
+    DOWNLOAD_PROGRESS_MAX = 40  # Download uses 0-40% of the total progress
+    INSTALL_PROGRESS_START = 40  # Installation starts at 40%
+    INSTALL_PROGRESS_MAX = 100  # Installation ends at 100%
+
+    def __init__(
+        self, branch_name: str, remote_sha: str, parent=None, release: dict = None
+    ):
         super().__init__(parent or mw)
         self.setWindowTitle("Updating Ankimon")
         self.setMinimumWidth(440)
@@ -1493,6 +1926,9 @@ class BranchUpdateProgressDialog(QDialog):
         # same download/apply/progress flow.
         self.release = release
 
+        if icon_path:
+            self.setWindowIcon(QIcon(str(icon_path)))
+
         is_dark = theme_manager.night_mode
         bg = "#2b2b2b" if is_dark else "#ffffff"
         text = "#e0e0e0" if is_dark else "#212121"
@@ -1500,8 +1936,8 @@ class BranchUpdateProgressDialog(QDialog):
         border = "#444444" if is_dark else "#e0e0e0"
         btn_bg = "#3d3d3d" if is_dark else "#eeeeee"
         btn_hover = "#505050" if is_dark else "#e0e0e0"
-        progress_text = "#ffffff" if is_dark else "#212121"
-        progress_chunk = "#1565c0" if is_dark else "#90caf9"
+        progress_text = "#ffffff" if is_dark else "#000000"
+        progress_chunk = "#2d8a4e" if is_dark else "#2da44e"
 
         self.setStyleSheet(f"""
             QDialog {{
@@ -1561,9 +1997,10 @@ class BranchUpdateProgressDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
+        self._update_succeeded = False
         self.btn_close = QPushButton("Close")
         self.btn_close.setEnabled(False)
-        self.btn_close.clicked.connect(self.accept)
+        self.btn_close.clicked.connect(self._on_close_clicked)
         btn_layout.addWidget(self.btn_close)
 
         layout.addLayout(btn_layout)
@@ -1575,6 +2012,12 @@ class BranchUpdateProgressDialog(QDialog):
             self.update_started = True
             self.start_update()
 
+    def _on_close_clicked(self):
+        """Only a successfully installed update needs an application shutdown."""
+        self.accept()
+        if self._update_succeeded:
+            mw.close()
+
     def start_update(self):
         from .update_manager import (
             _download_branch_zip,
@@ -1585,11 +2028,23 @@ class BranchUpdateProgressDialog(QDialog):
 
         release = self.release
         if release:
-            source_type, source_name, commit_sha = "release", release["name"], release["name"]
-            download = lambda: _download_zip_to_temp(release["zipball_url"], progress_cb=self.on_progress)
+            source_type, source_name, commit_sha = (
+                "release",
+                release["name"],
+                release["name"],
+            )
+            download = lambda: _download_zip_to_temp(
+                release["zipball_url"], progress_cb=self.on_progress
+            )
         else:
-            source_type, source_name, commit_sha = "branch", self.branch_name, self.remote_sha
-            download = lambda: _download_branch_zip(self.branch_name, progress_cb=self.on_progress)
+            source_type, source_name, commit_sha = (
+                "branch",
+                self.branch_name,
+                self.remote_sha,
+            )
+            download = lambda: _download_branch_zip(
+                self.branch_name, progress_cb=self.on_progress
+            )
         published_at = release.get("published_at") if release else None
 
         def bg(_col):
@@ -1598,7 +2053,26 @@ class BranchUpdateProgressDialog(QDialog):
                 return False, "Download failed. Check your internet connection.", None
 
             def status_update(msg):
-                mw.taskman.run_on_main(lambda: self.status_label.setText(msg))
+                # Handle progress messages from the installation
+                if msg.startswith("__PROGRESS__"):
+                    # Catch only expected parsing errors; log diagnostics for malformed payloads
+                    try:
+                        _, progress_data = msg.split("__PROGRESS__", 1)
+                        current, total = progress_data.split("|")
+                        current = int(current)
+                        total = int(total)
+                        percent = int((current / total) * 100) if total > 0 else 0
+                        mw.taskman.run_on_main(
+                            lambda: self._on_install_progress(percent)
+                        )
+                    except (ValueError, TypeError) as e:
+                        # Log the error but don't crash the update
+                        print(
+                            f"Ankimon Updater: Malformed progress message: {msg}, error: {e}"
+                        )
+                else:
+                    # Regular status message
+                    mw.taskman.run_on_main(lambda: self.status_label.setText(msg))
 
             return apply_update(
                 zip_path,
@@ -1619,17 +2093,21 @@ class BranchUpdateProgressDialog(QDialog):
             # to be written — see the matching note on the release/tag path.
             if success and pending_mod:
                 stamp_addon_mod(pending_mod)
+
+            self._update_succeeded = bool(success)
+            self.btn_close.setText("Close Anki" if success else "Close")
             self.btn_close.setEnabled(True)
+
             if success:
-                self.btn_close.setText("Restart Anki")
                 self.status_label.setText(
-                    "Update applied successfully! Please restart Anki."
+                    "Update applied successfully! Close Anki, then reopen it "
+                    "for the changes to take effect."
                 )
                 self.progress_bar.setValue(100)
                 QMessageBox.information(
                     self,
                     "Update Complete",
-                    f"{msg}\n\nPlease restart Anki for changes to take effect.",
+                    f"{msg}\n\nClick Close Anki, then reopen Anki for the changes to take effect.",
                 )
             else:
                 self.status_label.setText(f"Update failed: {msg}")
@@ -1637,6 +2115,8 @@ class BranchUpdateProgressDialog(QDialog):
                 QMessageBox.warning(self, "Update Failed", msg)
 
         def on_failed(exc):
+            self._update_succeeded = False
+            self.btn_close.setText("Close")
             self.btn_close.setEnabled(True)
             self.status_label.setText(
                 "Update stopped unexpectedly. Please check your connection and try again."
@@ -1651,9 +2131,38 @@ class BranchUpdateProgressDialog(QDialog):
         _start_query_op(self, bg, on_done, on_failed)
 
     def on_progress(self, current: int, total: int):
+        """Handle download progress updates from _download_zip_to_temp.
+
+        Scales download progress (0-100%) into the 0-40% range to reserve
+        space for installation progress.
+        """
         if total > 0:
             percent = int((current / total) * 100)
-            mw.taskman.run_on_main(lambda: self.progress_bar.setValue(percent))
+            scaled_percent = int((percent / 100) * self.DOWNLOAD_PROGRESS_MAX)
+            mw.taskman.run_on_main(lambda: self.progress_bar.setValue(scaled_percent))
+
+    def _on_install_progress(self, percent: int):
+        """Handle installation progress updates from apply_update.
+
+        Scales manager progress (0-100%) into the 40-100% range so that
+        the progress bar only reaches 100% when the manager reports 100%
+        completion. Only updates the progress bar if the new value is
+        higher than the current value, ensuring the bar never moves backwards.
+        """
+        if percent < 0:
+            scaled_percent = self.INSTALL_PROGRESS_START
+        elif percent >= 100:
+            scaled_percent = self.INSTALL_PROGRESS_MAX
+        else:
+            scaled_percent = self.INSTALL_PROGRESS_START + int(
+                (percent / 100)
+                * (self.INSTALL_PROGRESS_MAX - self.INSTALL_PROGRESS_START)
+            )
+
+        scaled_percent = min(scaled_percent, self.INSTALL_PROGRESS_MAX)
+
+        if scaled_percent > self.progress_bar.value():
+            self.progress_bar.setValue(scaled_percent)
 
 
 def show_branch_update_prompt(
@@ -1668,41 +2177,227 @@ def show_branch_update_prompt(
 def show_release_update_prompt(channel: str, release: dict):
     """Auto-update nudge for the stable / experimental release channels.
 
-    Shows the new version (and a snippet of its release notes) and, on accept,
+    Shows the new version with a scrollable release notes area and, on accept,
     installs it through the shared progress dialog. "Later" plus the snooze
     checkbox defers for a week — mirroring the branch prompt's behaviour.
     """
+
+    translate = services.translator.translate
     tag = release.get("name", "?")
-
-    box = QMessageBox(mw)
-    box.setWindowTitle("Ankimon Update Available")
-    box.setIcon(QMessageBox.Icon.Information)
-    box.setText(
-        f"A new <b>{channel}</b> release of Ankimon is available: "
-        f"<b>{tag}</b> (you have {addon_ver}).<br><br>"
-        "Your Pokémon data, team, and settings will be preserved."
-    )
     notes = (release.get("body") or "").strip()
+    notes_html = ""
+
     if notes:
-        # Keep the popup compact; the full notes live on the GitHub release page.
-        box.setInformativeText(notes[:800] + ("…" if len(notes) > 800 else ""))
+        notes_html = markdown_to_html(notes)
 
-    box.setStandardButtons(
-        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+    # Validate that the release has the required keys before proceeding
+    if not release.get("name") or not release.get("zipball_url"):
+        QMessageBox.warning(
+            mw,
+            translate("release_invalid_title"),
+            translate("release_invalid_body"),
+        )
+        return
+
+    dialog = QDialog(mw)
+    dialog.setWindowTitle(translate("release_update_available"))
+    dialog.setMinimumWidth(550)
+    dialog.setMinimumHeight(450)
+    if icon_path:
+        dialog.setWindowIcon(QIcon(str(icon_path)))
+
+    is_dark = theme_manager.night_mode
+    if is_dark:
+        bg = "#0d1117"
+        bg_darker = "#161b22"
+        bg_card_hover = "#252d3f"
+        border = "#2d3748"
+        text = "#f0f6fc"
+        accent_blue = "#58a6ff"
+        accent_green = "#3fb950"
+        btn_bg = "rgba(88, 166, 255, 0.08)"
+        btn_hover = "rgba(88, 166, 255, 0.18)"
+        update_btn_text = "#0d1117"
+    else:
+        bg = "#ffffff"
+        bg_darker = "#f0f2f5"
+        bg_card_hover = "#e9ecef"
+        border = "#d0d7de"
+        text = "#24292f"
+        accent_blue = "#0969da"
+        accent_green = "#2da44e"
+        btn_bg = "rgba(9, 105, 218, 0.08)"
+        btn_hover = "rgba(9, 105, 218, 0.18)"
+        update_btn_text = "#e6ffea"
+
+    dialog.setStyleSheet(f"""
+        QDialog {{
+            background-color: {bg};
+            color: {text};
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }}
+        QLabel {{
+            color: {text};
+            background: transparent;
+        }}
+        QTextBrowser {{
+            background-color: {bg_darker};
+            border: 1px solid {border};
+            border-radius: 8px;
+            padding: 14px;
+            color: {text};
+            font-size: 14px;
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }}
+        QTextBrowser a {{
+            color: {accent_blue};
+            text-decoration: none;
+        }}
+        QTextBrowser a:hover {{
+            text-decoration: underline;
+        }}
+        QTextBrowser b {{
+            color: {text};
+        }}
+        QPushButton {{
+            padding: 8px 20px;
+            border: 1px solid {border};
+            border-radius: 8px;
+            background: {btn_bg};
+            color: {text};
+            font-size: 0.85rem;
+            font-weight: 600;
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            min-width: 100px;
+        }}
+        QPushButton:hover {{
+            background: {btn_hover};
+            border-color: {accent_blue};
+        }}
+        QPushButton#updateBtn {{
+            background: {accent_green};
+            border: none;
+            color: {update_btn_text};
+            font-weight: 700;
+        }}
+        QPushButton#updateBtn:hover {{
+            background: #2ea043;
+        }}
+        QPushButton#laterBtn {{
+            background: transparent;
+            border: 1px solid {border};
+            color: {text};
+        }}
+        QPushButton#laterBtn:hover {{
+            background: {bg_card_hover};
+            border-color: {text};
+        }}
+        QCheckBox {{
+            color: {text};
+            font-size: 0.8rem;
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            spacing: 8px;
+        }}
+        QCheckBox::indicator {{
+            width: 16px;
+            height: 16px;
+            border: 2px solid {border};
+            border-radius: 4px;
+            background-color: {bg};
+        }}
+        QCheckBox::indicator:checked {{
+            background-color: {accent_blue};
+            border-color: {accent_blue};
+        }}
+        QCheckBox::indicator:hover {{
+            border-color: {accent_blue};
+        }}
+    """)
+
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(24, 24, 24, 24)
+    layout.setSpacing(16)
+
+    # Escape dynamic content before inserting it into the translated HTML title.
+    channel_key = f"release_channel_{channel.lower()}"
+    localized_channel = (
+        translate(channel_key)
+        if channel.lower() in {"stable", "experimental"}
+        else channel
     )
-    yes_btn = box.button(QMessageBox.StandardButton.Yes)
-    yes_btn.setText("Update Now")
-    box.button(QMessageBox.StandardButton.No).setText("Later")
-    box.setDefaultButton(QMessageBox.StandardButton.Yes)
+    title = translate(
+        "release_prompt_title",
+        channel=f"<b>{_escape(localized_channel)}</b>",
+        tag=f"<b>{_escape(tag)}</b>",
+    )
+    title_label = QLabel(
+        f"<span style='font-size: 1.2rem; font-weight: 800; letter-spacing: -0.3px; color: {text};'>{title}</span>"
+    )
+    title_label.setWordWrap(True)
+    layout.addWidget(title_label)
 
-    snooze = QCheckBox("Don't notify me for 1 week")
-    box.setCheckBox(snooze)
+    info_label = QLabel(translate("release_data_preserved"))
+    info_label.setStyleSheet(f"color: {text}; font-size: 0.88rem;")
+    info_label.setWordWrap(True)
+    layout.addWidget(info_label)
 
-    box.exec()
-    if box.clickedButton() is yes_btn:
+    if notes_html:
+        notes_label = QLabel(f"<b>{_escape(translate('release_notes'))}</b>")
+        notes_label.setStyleSheet(
+            f"color: {text}; font-weight: 700; font-size: 0.92rem;"
+        )
+        layout.addWidget(notes_label)
+
+        notes_browser = QTextBrowser()
+        notes_browser.setOpenExternalLinks(True)
+        notes_browser.setHtml(notes_html)
+        notes_browser.setMinimumHeight(200)
+        notes_browser.setMaximumHeight(350)
+        layout.addWidget(notes_browser)
+
+    snooze = QCheckBox(translate("release_snooze_week"))
+    layout.addWidget(snooze)
+
+    button_layout = QHBoxLayout()
+    button_layout.addStretch()
+
+    later_btn = QPushButton(translate("release_later"))
+    later_btn.setObjectName("laterBtn")
+    later_btn.setMinimumWidth(100)
+    button_layout.addWidget(later_btn)
+
+    update_btn = QPushButton(translate("release_update_now"))
+    update_btn.setObjectName("updateBtn")
+    update_btn.setMinimumWidth(120)
+    button_layout.addWidget(update_btn)
+
+    layout.addLayout(button_layout)
+
+    # A checked snooze applies only when the user defers the update. Qt emits
+    # finished for both accept and reject, including the window close button.
+    def _persist_snooze_if_checked(result):
+        if result != QDialog.DialogCode.Accepted and snooze.isChecked():
+            import time
+            from .update_manager import set_update_skip_until
+
+            set_update_skip_until(time.time() + 604800)
+
+    def on_update():
+        dialog.accept()
         BranchUpdateProgressDialog(tag, tag, mw, release=release).exec()
-    elif snooze.isChecked():
-        import time
-        from .update_manager import set_update_skip_until
 
-        set_update_skip_until(time.time() + 604800)
+    def on_later():
+        dialog.reject()
+        QMessageBox.information(
+            mw,
+            translate("release_later_title"),
+            translate("release_later_body"),
+        )
+
+    # Persist a requested snooze when the dialog is dismissed.
+    dialog.finished.connect(_persist_snooze_if_checked)
+
+    update_btn.clicked.connect(on_update)
+    later_btn.clicked.connect(on_later)
+
+    dialog.exec()

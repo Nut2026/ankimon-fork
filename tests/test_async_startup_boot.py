@@ -146,6 +146,11 @@ class FakeBackupManager:
     def __init__(self, logger, settings_obj):
         type(self).instances.append(self)
         self.create_calls = []
+        self.settings_obj = settings_obj
+
+    def run_profile_backup_tasks(self):
+        if self.settings_obj.get("misc.developer_mode"):
+            self.create_backup(manual=False)
 
     def create_backup(self, manual=False):
         self.create_calls.append(manual)
@@ -236,6 +241,14 @@ def startup_env(monkeypatch, tmp_path):
             pokemon_history_path="history",
             user_path_credentials="credentials",
             rate_path="rate",
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "Ankimon.functions.tm_learnset",
+        _stub_module(
+            "Ankimon.functions.tm_learnset",
+            warm_tm_learnset_cache=rec("warm_tm_learnset_cache", 1500),
         ),
     )
     monkeypatch.setitem(
@@ -386,6 +399,7 @@ def test_background_checks_do_no_ui_work_and_return_contract(startup_env):
     assert _called(env, "generate_random_pokemon")
     assert _called(env, "count_items_and_rewrite")
     assert _called(env, "warm_evolution_caches")
+    assert _called(env, "warm_tm_learnset_cache")
 
 
 def test_background_checks_warm_the_evolution_table(startup_env):
@@ -403,6 +417,14 @@ def test_background_checks_warm_the_evolution_table(startup_env):
     env.mod.run_startup_background_checks()
 
     assert len(_called(env, "warm_evolution_caches")) == 1
+
+
+def test_background_checks_warm_the_tm_learnset_table(startup_env):
+    """TM JSON is bundled static data and must be parsed off the GUI path."""
+    env = startup_env
+    env.mod.run_startup_background_checks()
+
+    assert len(_called(env, "warm_tm_learnset_cache")) == 1
 
 
 def test_evolution_table_is_warmed_even_when_assets_are_missing(startup_env):
@@ -438,6 +460,24 @@ def test_a_failing_warm_cannot_fail_the_boot(startup_env, monkeypatch):
     assert _called(env, "count_items_and_rewrite")
     assert any(
         call[0] == "log" and call[1] == "error" and "data_files unreadable" in call[2]
+        for call in env.calls
+    )
+
+
+def test_a_failing_tm_warm_cannot_fail_the_boot(startup_env, monkeypatch):
+    env = startup_env
+
+    def boom():
+        raise OSError("TM data unreadable")
+
+    monkeypatch.setattr(env.mod, "warm_tm_learnset_cache", boom)
+
+    results = env.mod.run_startup_background_checks()
+
+    assert results["database_complete"] is True
+    assert _called(env, "count_items_and_rewrite")
+    assert any(
+        call[0] == "log" and call[1] == "error" and "TM data unreadable" in call[2]
         for call in env.calls
     )
 

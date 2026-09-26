@@ -25,6 +25,9 @@ from .pokedex.pokedex_obj import Pokedex
 from .pyobj.achievement_window import AchievementWindow
 from .pyobj.ankimon_tracker_window import AnkimonTrackerWindow
 from .pyobj.backup_manager import BackupManager
+from .pyobj.save_transfer import (
+    export_save, import_save, cancel_pending_save_import, browse_recovered_saves,
+)
 from .gui_classes.backup_manager_dialog import BackupManagerDialog
 from .gui_entities import (
     License,
@@ -219,6 +222,31 @@ def create_menu_actions(
     backup_manager_action.triggered.connect(lambda: BackupManagerDialog(backup_manager, mw).exec())
     game_menu.addAction(backup_manager_action)
 
+    # Manual save transfer. This is the supported way to move a save between
+    # computers now that the automatic AnkiWeb file-sync is gone; before this
+    # there was no way to do it in either direction (the Backup Manager only
+    # ever wrote to a fixed path it chose itself). Kept next to Backup Manager
+    # rather than split across menus — they are the same kind of operation.
+    export_save_action = QAction("Export Save File…", mw)
+    export_save_action.setMenuRole(QAction.MenuRole.NoRole)
+    export_save_action.triggered.connect(lambda: export_save(mw))
+    game_menu.addAction(export_save_action)
+
+    import_save_action = QAction("Import Save File…", mw)
+    import_save_action.setMenuRole(QAction.MenuRole.NoRole)
+    import_save_action.triggered.connect(lambda: import_save(mw))
+    game_menu.addAction(import_save_action)
+
+    cancel_import_action = QAction("Cancel Pending Save Import", mw)
+    cancel_import_action.setMenuRole(QAction.MenuRole.NoRole)
+    cancel_import_action.triggered.connect(cancel_pending_save_import)
+    game_menu.addAction(cancel_import_action)
+
+    recovery_action = QAction("Browse Pre-import Recovery Saves…", mw)
+    recovery_action.setMenuRole(QAction.MenuRole.NoRole)
+    recovery_action.triggered.connect(browse_recovered_saves)
+    game_menu.addAction(recovery_action)
+
     # Effectiveness chart
     eff_chart_action = QAction(mw.translator.translate("eff_chart_button"), mw)
     eff_chart_action.setMenuRole(QAction.MenuRole.NoRole)
@@ -281,46 +309,17 @@ def create_menu_actions(
     rate_action.triggered.connect(rate_addon_url)
     mw.pokemenu.addAction(rate_action)
 
-    # Update Ankimon. On a git checkout the file-overwrite updater is unsafe (it
-    # would clobber the working tree), so offer a safe `git pull --ff-only`
-    # instead; otherwise the normal download-based updater dialog.
-    from .pyobj.update_manager import is_git_clone, git_pull_ff_only
-    if is_git_clone():
-        def _git_update():
-            if not askUser(
-                "Update Ankimon by fast-forwarding your git clone "
-                "(git pull --ff-only)?\n\nThis stops safely without making any "
-                "changes if you have local edits or commits.",
-                title="Update Ankimon (git)",
-            ):
-                return
+    # Update Ankimon. Git checkouts use the same full dialog as packaged installs;
+    # the dialog routes branch/PR/tag selections through safe Git operations.
+    def _open_update_dialog():
+        from .pyobj.update_dialog import UpdateDialog
+        dialog = UpdateDialog(parent=mw)
+        dialog.exec()
 
-            from aqt.operations import QueryOp
-
-            def on_done(result):
-                ok, msg = result
-                (showInfo if ok else showWarning)(msg)
-
-            QueryOp(
-                parent=mw, op=lambda col: git_pull_ff_only(), success=on_done
-            ).without_collection().run_in_background()
-
-        update_action = QAction(
-            mw.translator.translate("ankimon_update_button") + " (git pull)", mw
-        )
-        update_action.setMenuRole(QAction.MenuRole.NoRole)
-        update_action.triggered.connect(_git_update)
-        help_menu.addAction(update_action)
-    else:
-        def _open_update_dialog():
-            from .pyobj.update_dialog import UpdateDialog
-            dialog = UpdateDialog(parent=mw)
-            dialog.exec()
-
-        update_action = QAction(mw.translator.translate("ankimon_update_button"), mw)
-        update_action.setMenuRole(QAction.MenuRole.NoRole)
-        update_action.triggered.connect(_open_update_dialog)
-        help_menu.addAction(update_action)
+    update_action = QAction(mw.translator.translate("ankimon_update_button"), mw)
+    update_action.setMenuRole(QAction.MenuRole.NoRole)
+    update_action.triggered.connect(_open_update_dialog)
+    help_menu.addAction(update_action)
 
     # Version
     version_action = QAction(mw.translator.translate("ankimon_version_button"), mw)
