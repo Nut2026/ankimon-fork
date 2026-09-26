@@ -386,7 +386,7 @@ class BackupManager:
             self.run_profile_backup_tasks, completed, uses_collection=False,
         )
 
-    def _backup_directories(self):
+    def _backup_directories(self, required_file=None):
         """Keep originals discoverable until their complete copies are published."""
         roots = [self.backups_path]
         legacy = self.addon_path.parent / "ankimon_backups"
@@ -405,7 +405,7 @@ class BackupManager:
             for entry in entries:
                 if root == legacy and entry.name in plan:
                     target = self.backups_path / plan[entry.name]
-                    if self._migrated_paths.get(entry) == target:
+                    if self._resolve_backup_path(entry, required_file) == target:
                         continue
                 yield entry
 
@@ -451,7 +451,7 @@ class BackupManager:
         if services.db is None:
             return backups
         active_db = services.db.db_path.name
-        for backup_dir in self._backup_directories():
+        for backup_dir in self._backup_directories(active_db):
             if backup_dir.name.startswith("backup_") and backup_dir.is_dir():
                 # Only show a backup if it contains the database for the active mode.
                 if not (backup_dir / active_db).exists():
@@ -929,7 +929,7 @@ class BackupManager:
                 showWarning("Backups are being moved. Please try restoring again shortly.")
                 return
             try:
-                backup_file = self._resolve_backup_path(backup_path_str) / target.name
+                backup_file = self._resolve_backup_path(backup_path_str, target.name) / target.name
                 if not backup_file.is_file():
                     showWarning(
                         "The selected backup does not contain a backup for the active "
@@ -944,11 +944,7 @@ class BackupManager:
                 source = backup_file.resolve()
                 private = Path(tempfile.mkdtemp(prefix="ankimon-backup-restore-"))
                 try:
-                    snapshot = private / source.name
-                    for suffix in ("", "-wal", "-journal"):
-                        journal = Path(str(source) + suffix)
-                        if not suffix or journal.exists():
-                            shutil.copyfile(journal, private / journal.name)
+                    snapshot = self._copy_restore_source(source, private)
                     pending = stage_import(
                         snapshot, target, sanitize_credentials=False,
                         retain_unverified=retain_unverified,
@@ -1037,10 +1033,69 @@ class BackupManager:
                 "active and the prepared restore remains pending."
             )
 
-    def _resolve_backup_path(self, path) -> Path:
+    @staticmethod
+    def _copy_restore_source(source: Path, private: Path) -> Path:
+        """Copy a stable SQLite file family without opening the source in SQLite.
+
+        A linked backup may still be open in another process. A checkpoint
+        between copying its main file and WAL can otherwise produce a valid
+        but stale save. Verify identities, timestamps, membership and bytes;
+        retry changes before allowing stage_import to see the private copy.
+        """
+        from ..save_import import _digest
+
+        family = [Path(str(source) + suffix) for suffix in ("", "-wal", "-journal")]
+        deadline = time.monotonic() + 30.0
+
+        def signatures():
+            result = []
+            for member in family:
+                try:
+                    stat = member.stat()
+                except FileNotFoundError:
+                    result.append(None)
+                else:
+                    result.append((stat.st_dev, stat.st_ino, stat.st_size,
+                                   stat.st_mtime_ns, stat.st_ctime_ns))
+            return result
+
+        for _ in range(3):
+            if time.monotonic() >= deadline:
+                break
+            # A retry must not reuse a WAL that disappeared after the last copy.
+            for member in family:
+                (private / member.name).unlink(missing_ok=True)
+            before = signatures()
+            try:
+                if before[0] is None:
+                    raise FileNotFoundError(source)
+                present = [member for member, stamp in zip(family, before) if stamp is not None]
+                for member in present:
+                    shutil.copyfile(member, private / member.name)
+                if signatures() != before:
+                    continue
+                if any(_digest(member, deadline) != _digest(private / member.name, deadline)
+                       for member in present):
+                    continue
+                if signatures() == before:
+                    return private / source.name
+            except FileNotFoundError:
+                # Checkpoints and journal cleanup may remove a member mid-copy.
+                continue
+        raise OSError("The selected backup changed while being copied. Please try restoring again.")
+
+    def _resolve_backup_path(self, path, required_file=None) -> Path:
         """Keep selections made before migration usable for this session."""
         path = Path(path)
-        return self._migrated_paths.get(path, path)
+        relocated = self._migrated_paths.get(path, path)
+        # A published directory can contain a rebased link to a sibling that
+        # failed to publish. Retain the usable original until that dependency
+        # exists; top-level directory links need the same fallback.
+        original_entry = path / required_file if required_file else path
+        relocated_entry = relocated / required_file if required_file else relocated
+        if not relocated_entry.exists() and original_entry.exists():
+            return path
+        return relocated
 
     def _migration_protected_paths(self):
         if self.backups_path is None:

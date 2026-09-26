@@ -2107,3 +2107,193 @@ def test_restore_preserves_migration_digest_and_committed_wal(
     bm.run_profile_backup_tasks()
     assert not root.exists()
     assert not (bm.backups_path / bm.MIGRATION_RECORD).exists()
+
+
+@pytest.mark.parametrize("change_at", ["main", "wal"])
+@pytest.mark.parametrize("linked", [False, pytest.param(
+    True, marks=pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges"),
+)])
+def test_restore_retries_checkpointed_file_family(mock_env, monkeypatch, change_at, linked):
+    import shutil
+    from Ankimon.save_import import cancel_pending_import, pending_import_info
+
+    bm, active, _, addon = mock_env
+    backup = bm.backups_path / "backup_checkpoint"
+    backup.mkdir()
+    source = addon.parent / "external.db" if linked else backup / "ankimon.db"
+    _seed_db(source, "Before", 111)
+    if linked:
+        (backup / "ankimon.db").symlink_to(source)
+    writer = sqlite3.connect(source)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("UPDATE config SET value='Committed before restore' WHERE key='trainer.name'")
+    writer.commit()
+    copyfile = shutil.copyfile
+    changed = False
+    copies = 0
+
+    def checkpoint_during_copy(src, dst, *args, **kwargs):
+        nonlocal changed, copies
+        result = copyfile(src, dst, *args, **kwargs)
+        if Path(src) == source:
+            copies += 1
+        trigger = source if change_at == "main" else Path(str(source) + "-wal")
+        if Path(src) == trigger and not changed:
+            changed = True
+            if change_at == "main":
+                assert writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() == (0, 0, 0)
+            else:
+                # Closing checkpoints and removes the WAL AFTER it was copied.
+                # A retry must discard that now-stale private WAL.
+                writer.close()
+                assert not Path(str(source) + "-wal").exists()
+        return result
+
+    monkeypatch.setattr(shutil, "copyfile", checkpoint_during_copy)
+    try:
+        bm.restore_backup(str(backup))
+        assert changed and copies == 2
+        pending = pending_import_info(active.db_path)
+        assert pending is not None, _bm_mod.showWarning.call_args_list
+        with closing(sqlite3.connect(pending["pending_path"])) as staged:
+            assert staged.execute(
+                "SELECT value FROM config WHERE key='trainer.name'"
+            ).fetchone() == ("Committed before restore",)
+        _bm_mod.showWarning.assert_not_called()
+    finally:
+        writer.close()
+        cancel_pending_import(active.db_path)
+
+
+def test_restore_refuses_continuously_changing_backup(mock_env, monkeypatch):
+    import shutil
+    from Ankimon.save_import import pending_import_info
+
+    bm, active, _, _ = mock_env
+    backup = bm.backups_path / "backup_busy"
+    backup.mkdir()
+    source = backup / "ankimon.db"
+    _seed_db(source, "Before", 111)
+    writer = sqlite3.connect(source)
+    writer.execute("PRAGMA journal_mode=WAL")
+    copyfile = shutil.copyfile
+    copies = 0
+
+    def update_during_every_copy(src, dst, *args, **kwargs):
+        nonlocal copies
+        result = copyfile(src, dst, *args, **kwargs)
+        if Path(src) == source:
+            copies += 1
+            writer.execute("UPDATE config SET value=? WHERE key='trainer.cash'", (str(copies),))
+            writer.commit()
+            writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return result
+
+    monkeypatch.setattr(shutil, "copyfile", update_during_every_copy)
+    try:
+        bm.restore_backup(str(backup))
+        assert copies == 3
+        assert pending_import_info(active.db_path) is None
+        assert "changed while being copied" in _bm_mod.showWarning.call_args.args[0]
+        _bm_mod.close_anki.assert_not_called()
+    finally:
+        writer.close()
+
+
+def test_restore_checks_bytes_when_timestamps_do_not_change(mock_env, monkeypatch):
+    import shutil
+    from Ankimon.save_import import cancel_pending_import, pending_import_info
+
+    bm, active, _, _ = mock_env
+    backup = bm.backups_path / "backup_cached_timestamps"
+    backup.mkdir()
+    source = backup / "ankimon.db"
+    _seed_db(source, "Before", 111)
+    original_stat = source.stat()
+    real_stat, copyfile = Path.stat, shutil.copyfile
+    copies = 0
+
+    def cached_timestamp(path, *args, **kwargs):
+        # Windows may retain cached timestamps while a writer's handle is open.
+        return original_stat if path == source else real_stat(path, *args, **kwargs)
+
+    def update_once(src, dst, *args, **kwargs):
+        nonlocal copies
+        result = copyfile(src, dst, *args, **kwargs)
+        if Path(src) == source:
+            copies += 1
+            if copies == 1:
+                with closing(sqlite3.connect(source)) as writer:
+                    writer.execute("UPDATE config SET value='NewOne' WHERE key='trainer.name'")
+                    writer.commit()
+                assert real_stat(source).st_size == original_stat.st_size
+        return result
+
+    monkeypatch.setattr(Path, "stat", cached_timestamp)
+    monkeypatch.setattr(shutil, "copyfile", update_once)
+    try:
+        bm.restore_backup(str(backup))
+        assert copies == 2
+        pending = pending_import_info(active.db_path)
+        assert pending is not None
+        with closing(sqlite3.connect(pending["pending_path"])) as staged:
+            assert staged.execute(
+                "SELECT value FROM config WHERE key='trainer.name'"
+            ).fetchone() == ("NewOne",)
+    finally:
+        cancel_pending_import(active.db_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges")
+@pytest.mark.parametrize("directory_link", [False, True])
+def test_partial_link_publication_keeps_original_listable_and_restorable(
+    mock_env, monkeypatch, directory_link,
+):
+    import shutil
+    from Ankimon.save_import import cancel_pending_import, pending_import_info
+
+    bm, active, _, addon = mock_env
+    root = addon.parent / "ankimon_backups"
+    alias, original = root / "backup_a", root / "backup_z"
+    original.mkdir(parents=True)
+    _seed_db(original / "ankimon.db", "Legacy", 123)
+    if directory_link:
+        alias.symlink_to(original.name, target_is_directory=True)
+    else:
+        alias.mkdir()
+        (alias / "ankimon.db").symlink_to("../backup_z/ankimon.db")
+    copyfile, iterdir = shutil.copyfile, Path.iterdir
+
+    def ordered_entries(path):
+        if path == root:
+            return iter([alias, original])
+        return iterdir(path)
+
+    def fail_dependency(source, target, **kwargs):
+        if Path(source) == original / "ankimon.db":
+            raise OSError("disk full")
+        return copyfile(source, target, **kwargs)
+
+    with monkeypatch.context() as failed:
+        failed.setattr(Path, "iterdir", ordered_entries)
+        failed.setattr(shutil, "copyfile", fail_dependency)
+        bm.run_profile_backup_tasks()
+    assert (alias / "ankimon.db").is_file()
+    assert not (bm.backups_path / alias.name / "ankimon.db").exists()
+    assert str(alias) in {row["path"] for row in bm.get_backups()}
+    try:
+        bm.restore_backup(str(alias))
+        pending = pending_import_info(active.db_path)
+        assert pending is not None, _bm_mod.showWarning.call_args_list
+        with closing(sqlite3.connect(pending["pending_path"])) as staged:
+            assert staged.execute(
+                "SELECT value FROM config WHERE key='trainer.name'"
+            ).fetchone() == ("Legacy",)
+    finally:
+        cancel_pending_import(active.db_path)
+    bm.run_profile_backup_tasks()
+    assert not root.exists()
+    assert bm._resolve_backup_path(alias, "ankimon.db") == bm.backups_path / alias.name
+    assert {row["path"] for row in bm.get_backups()} == {
+        str(bm.backups_path / name) for name in (alias.name, original.name)
+    }
