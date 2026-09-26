@@ -99,6 +99,13 @@ def mock_env(tmp_path):
     addon_dir = tmp_path / "Ankimon"
     addon_dir.mkdir()
 
+    # BackupManager anchors backups_path at mw.pm.profileFolder(). Point that at
+    # a real per-test folder: without it, Path(MagicMock(...)) stringifies to a
+    # junk path shared by every manager in the session, so backups created by
+    # other tests appear in this one's listing (and vice versa).
+    profile_folder = tmp_path / "anki-profile"
+    profile_folder.mkdir(parents=True, exist_ok=True)
+
     # Mock resources within database_manager and backup_manager namespaces.
     # Also neutralize the interactive/UI helpers bound inside backup_manager:
     # in a full-suite run the real aqt.utils may already be imported, so the
@@ -111,7 +118,8 @@ def mock_env(tmp_path):
          patch.object(_bm_mod, "askUser", return_value=True), \
          patch.object(_bm_mod, "showInfo"), \
          patch.object(_bm_mod, "showWarning"), \
-         patch.object(_bm_mod, "close_anki"):
+         patch.object(_bm_mod, "close_anki"), \
+         patch("aqt.mw.pm.profileFolder", return_value=str(profile_folder)):
 
         # Instantiate test database manager
         db = AnkimonDB(MockLogger())
@@ -1289,3 +1297,417 @@ def test_a_backup_publishes_through_locks_that_clear(mock_env, monkeypatch):
     assert bm.create_backup(required_file="ankimon.db", deadline=time.monotonic() + 30) is True
     assert refused == ["snapshot", "folder"]
     assert len(list(bm.backups_path.glob("backup_*"))) == 1
+
+
+def test_backups_path_is_none_when_no_profile_resolves(mock_env, monkeypatch):
+    """A profileFolder() failure must not leave a stale path anchored.
+
+    If it did, a later create_backup could publish into the previous profile's
+    folder, where the current profile's get_backups cannot see it.
+    """
+    bm, _, _, _ = mock_env
+    # The fixture already anchored a real path; prove refresh clears it.
+    assert bm.backups_path is not None
+    monkeypatch.setattr("aqt.mw.pm.profileFolder",
+                        MagicMock(side_effect=RuntimeError("profile volume unavailable")))
+    bm.refresh_profile_path()
+    assert bm.backups_path is None
+
+
+def test_no_profile_means_no_backup_operations(mock_env, monkeypatch):
+    """Every entry point that touches backups_path must refuse when it is None."""
+    bm, _, user_files_dir, _ = mock_env
+    monkeypatch.setattr("aqt.mw.pm.profileFolder",
+                        MagicMock(side_effect=RuntimeError("profile volume unavailable")))
+    bm.refresh_profile_path()
+    assert bm.backups_path is None
+
+    # get_backups: nothing to list, and no crash on None.iterdir().
+    assert bm.get_backups() == []
+
+    before = {p.name for p in user_files_dir.iterdir()}
+    assert bm.create_backup(required_file="ankimon.db") is False
+    after = {p.name for p in user_files_dir.iterdir()}
+    assert before == after
+    with patch.object(_bm_mod, "showWarning") as warning:
+        assert bm.create_backup(manual=True, required_file="ankimon.db") is False
+    assert warning.call_count == 1
+    assert "no active Anki profile folder" in warning.call_args.args[0]
+    assert {p.name for p in user_files_dir.iterdir()} == before
+
+    # cleanup_backups and its helpers: no-op rather than AttributeError.
+    bm.cleanup_backups()
+    assert bm._discarded() == []
+    bm._sweep_leftovers()
+
+
+def test_migration_collision_keeps_both_backups_listable(mock_env):
+    """A same-named backup directory in both locations must stay listable.
+
+    Renaming files inside the destination backup (the previous approach) hides
+    the legacy snapshot from get_backups(), which looks for ``ankimon.db`` by
+    name. Renaming the colliding backup directory as a whole keeps both
+    ``backup_*`` folders visible, and each keeps an ``ankimon.db``.
+    """
+    bm, _, _, addon_dir = mock_env
+    legacy_root = addon_dir.parent / "ankimon_backups"
+    legacy_root.mkdir()
+    legacy_name = "backup_2026-09-25_10-00-00"
+    legacy_backup = legacy_root / legacy_name
+    legacy_backup.mkdir()
+    _seed_db(legacy_backup / "ankimon.db", "Legacy", 111)
+    (legacy_backup / "summary.json").write_text(json.dumps({
+        "date": "2026-09-25 10-00-00",
+        "normal_stats": {"trainer_name": "Legacy", "trainer_cash": 111},
+    }), encoding="utf-8")
+
+    # The destination already holds a same-named backup with a different save.
+    existing = bm.backups_path / legacy_name
+    existing.mkdir()
+    _seed_db(existing / "ankimon.db", "Existing", 999)
+
+    bm._migrate_legacy_backups(bm.backups_path.parent)
+
+    # The legacy snapshot still exists as a listable ``backup_*`` directory,
+    # under a distinct name, with its inner ``ankimon.db`` intact.
+    legacy_copies = [
+        p for p in bm.backups_path.iterdir()
+        if p.name.startswith(legacy_name) and (p / "ankimon.db").is_file()
+    ]
+    assert {p.name for p in legacy_copies} == {
+        legacy_name, f"{legacy_name}__legacy_{legacy_copies[1].name.rsplit('_', 1)[-1]}",
+    } or len(legacy_copies) == 2, "both backups must survive the collision"
+    assert legacy_root.exists() is False or not list(legacy_root.iterdir())
+
+    # get_backups() must see both the existing backup and the migrated legacy
+    # snapshot, since each still contains an ``ankimon.db`` for the active mode.
+    names = {Path(bk["path"]).name for bk in bm.get_backups()}
+    assert existing.name in names
+    migrated = next(p for p in legacy_copies if p.name != existing.name)
+    assert migrated.name in names
+    # The migrated snapshot kept its original ``ankimon.db`` filename, which is
+    # what the listing and restore paths expect.
+    assert (migrated / "ankimon.db").is_file()
+    assert not list(bm.backups_path.glob("ankimon__legacy_*.db"))
+
+
+def test_migration_collision_seeds_legacy_name_inside_backup_namespace(mock_env):
+    """The renamed legacy directory must still match the ``backup_`` listing filter."""
+    bm, _, _, addon_dir = mock_env
+    legacy_root = addon_dir.parent / "ankimon_backups"
+    legacy_root.mkdir()
+    name = "backup_2026-09-25_11-00-00"
+    (legacy_root / name).mkdir()
+    _seed_db(legacy_root / name / "ankimon.db", "Legacy", 1)
+    (bm.backups_path / name).mkdir()
+    _seed_db(bm.backups_path / name / "ankimon.db", "Existing", 2)
+
+    bm._migrate_legacy_backups(bm.backups_path.parent)
+
+    assert len(list(bm.backups_path.glob("backup_*"))) == 2
+    assert bm._legacy_collision_name(bm.backups_path / name).name.startswith("backup_")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs privileges on Windows")
+def test_migration_does_not_follow_a_linked_legacy_root(mock_env, tmp_path):
+    """A linked legacy_path is not a migration source: walking it moves external files."""
+    bm, _, _, addon_dir = mock_env
+    external = tmp_path / "external-backups"
+    external.mkdir()
+    (external / "backup_2026-09-25_12-00-00").mkdir()
+    (external / "backup_2026-09-25_12-00-00" / "ankimon.db").write_bytes(b"external")
+    legacy_root = addon_dir.parent / "ankimon_backups"
+    legacy_root.symlink_to(external, target_is_directory=True)
+
+    bm._migrate_legacy_backups(bm.backups_path.parent)
+
+    # The external folder is untouched, and nothing was copied into the profile.
+    assert (external / "backup_2026-09-25_12-00-00" / "ankimon.db").read_bytes() == b"external"
+    assert list(bm.backups_path.iterdir()) == []
+    # The link itself remains, so the user can decide what to do with it.
+    assert legacy_root.is_symlink()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs privileges on Windows")
+def test_migration_moves_a_linked_entry_without_following_it(mock_env, tmp_path):
+    """A link inside the legacy root moves as a link; its target is not walked."""
+    bm, _, _, addon_dir = mock_env
+    external = tmp_path / "external-backups"
+    external.mkdir()
+    (external / "ankimon.db").write_bytes(b"external")
+    legacy_root = addon_dir.parent / "ankimon_backups"
+    legacy_root.mkdir()
+    (legacy_root / "linked-entry").symlink_to(external, target_is_directory=True)
+    (legacy_root / "backup_2026-09-25_13-00-00").mkdir()
+    (legacy_root / "backup_2026-09-25_13-00-00" / "ankimon.db").write_bytes(b"legacy")
+
+    bm._migrate_legacy_backups(bm.backups_path.parent)
+
+    # The external folder is untouched: the link was moved, not walked.
+    assert (external / "ankimon.db").read_bytes() == b"external"
+    assert (bm.backups_path / "linked-entry").is_symlink()
+    assert (bm.backups_path / "backup_2026-09-25_13-00-00" / "ankimon.db").read_bytes() == b"legacy"
+    assert not legacy_root.exists()
+
+
+def _legacy_migration_save(mock_env):
+    bm, _, _, addon_dir = mock_env
+    root = addon_dir.parent / "ankimon_backups"
+    backup = root / "backup_2026-09-25_12-00-00"
+    backup.mkdir(parents=True)
+    _seed_db(backup / "ankimon.db", "Legacy", 111)
+    return bm, root, backup
+
+
+@pytest.mark.parametrize("partial_delete", [False, True])
+def test_migration_retry_preserves_five_distinct_snapshots(mock_env, monkeypatch, partial_delete):
+    import shutil
+
+    bm, _, _, addon = mock_env
+    root = addon.parent / "ankimon_backups"
+    root.mkdir()
+    originals = set()
+    for i in range(5):
+        folder = root / f"backup_{i}"
+        folder.mkdir()
+        _seed_db(folder / "ankimon.db", f"Save{i}", i)
+        originals.add((folder / "ankimon.db").read_bytes())
+
+    def interrupted_cleanup(path, *args, **kwargs):
+        if partial_delete:
+            (Path(path) / "ankimon.db").unlink(missing_ok=True)
+        raise PermissionError("antivirus lock")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(shutil, "rmtree", interrupted_cleanup)
+        bm.run_profile_backup_tasks()
+    assert len(bm.get_backups()) == 5
+    bm.MAX_BACKUPS = 1
+    bm.cleanup_backups()
+    assert len(bm.get_backups()) == 5  # Pending publications are protected.
+    # A fresh manager must resume the persistent record, not just in-memory state.
+    retry = BackupManager(bm.logger, bm.settings_obj)
+    retry.run_profile_backup_tasks()
+    retry.cleanup_backups()
+    assert not root.exists()
+    assert len(retry.get_backups()) == 5
+    assert {Path(b["path"]).joinpath("ankimon.db").read_bytes()
+            for b in retry.get_backups()} == originals
+
+
+@pytest.mark.parametrize("fail_at", [1, 2])
+def test_failed_migration_keeps_all_originals_discoverable(mock_env, monkeypatch, fail_at):
+    import shutil
+
+    bm, _, _, addon = mock_env
+    root = addon.parent / "ankimon_backups"
+    root.mkdir()
+    for i in range(3):
+        folder = root / f"backup_{i}"
+        folder.mkdir()
+        _seed_db(folder / "ankimon.db", f"Save{i}", i)
+    real_copy = shutil.copy2
+    calls = 0
+
+    def disk_full(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == fail_at:
+            raise OSError(28, "No space left on device")
+        return real_copy(*args, **kwargs)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(shutil, "copy2", disk_full)
+        bm.run_profile_backup_tasks()
+    assert len(bm.get_backups()) == 3
+    assert all(Path(b["path"]).joinpath("ankimon.db").is_file() for b in bm.get_backups())
+    bm.run_profile_backup_tasks()
+    assert len(bm.get_backups()) == 3
+    assert not root.exists()
+
+
+def test_profile_refresh_schedules_without_copying_on_gui_thread(mock_env, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    bm, root, _ = _legacy_migration_save(mock_env)
+    tasks = []
+    monkeypatch.setattr("aqt.mw.taskman.run_in_background", lambda task, done: tasks.append(task))
+    bm.refresh_profile_path()
+    bm.schedule_profile_backup_tasks()
+    assert root.exists()
+    assert not list(bm.backups_path.glob("backup_*"))
+    seen_threads = []
+    original = bm._migrate_legacy_backups
+
+    def migrate(profile):
+        seen_threads.append(threading.current_thread())
+        original(profile)
+
+    monkeypatch.setattr(bm, "_migrate_legacy_backups", migrate)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(tasks[0]).result()
+    assert not root.exists()
+    assert all(thread is not threading.main_thread() for thread in seen_threads)
+
+
+def test_developer_startup_backup_waits_for_profile_and_runs_once(mock_env, monkeypatch):
+    bm, _, _, _ = mock_env
+    profile = bm.backups_path.parent
+    bm.backups_path = None
+    bm.settings_obj.get.side_effect = lambda key, default=None: key == "misc.developer_mode"
+    backup = MagicMock(return_value=True)
+    monkeypatch.setattr(bm, "create_backup", backup)
+    bm.run_profile_backup_tasks()
+    backup.assert_not_called()
+    monkeypatch.setattr("aqt.mw.pm.profileFolder", lambda: str(profile))
+    bm.refresh_profile_path()
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(bm.run_profile_backup_tasks)
+        second = pool.submit(bm.run_profile_backup_tasks)
+        first.result()
+        second.result()
+    backup.assert_called_once_with(manual=False)
+
+
+def test_hot_reload_never_arms_deferred_startup_backup(mock_env, monkeypatch):
+    bm, _, _, _ = mock_env
+    bm.settings_obj.get.side_effect = lambda key, default=None: key == "misc.developer_mode"
+    monkeypatch.setattr(services, "_is_reloading", True, raising=False)
+    reloaded = BackupManager(bm.logger, bm.settings_obj)
+    # Startup clears this flag before a later profile-open event.
+    monkeypatch.setattr(services, "_is_reloading", False)
+    backup = MagicMock(return_value=True)
+    monkeypatch.setattr(reloaded, "create_backup", backup)
+    reloaded.run_profile_backup_tasks()
+    reloaded.run_profile_backup_tasks()
+    backup.assert_not_called()
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_migration_publication_failure_preserves_save(mock_env, monkeypatch, interrupted):
+    bm, root, backup = _legacy_migration_save(mock_env)
+    original = (backup / "ankimon.db").read_bytes()
+    old = time.time() - 7200
+    os.utime(backup, (old, old))
+
+    def refuse_publication(source, destination):
+        if interrupted:
+            raise KeyboardInterrupt("interrupted before publication")
+        raise PermissionError("publication temporarily locked")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(os, "replace", refuse_publication)
+        if interrupted:
+            with pytest.raises(KeyboardInterrupt):
+                bm.refresh_profile_path()
+                bm.run_profile_backup_tasks()
+        else:
+            bm.refresh_profile_path()
+            bm.run_profile_backup_tasks()
+        assert (backup / "ankimon.db").read_bytes() == original
+        # Simulate cleanup before a retry; abandoned staging is never the only copy.
+        bm.backups_path = root.parent / "anki-profile" / "Ankimon_Backups"
+        bm._sweep_leftovers()
+        assert (backup / "ankimon.db").read_bytes() == original
+
+    bm.refresh_profile_path()
+    bm.run_profile_backup_tasks()
+    assert not root.exists()
+    assert len(bm.get_backups()) == 1
+    assert (bm.backups_path / backup.name / "ankimon.db").read_bytes() == original
+
+
+def test_migration_partial_copy_stays_hidden(mock_env, monkeypatch):
+    import shutil
+
+    bm, _, backup = _legacy_migration_save(mock_env)
+    original = (backup / "ankimon.db").read_bytes()
+
+    def disk_full(source, destination, **kwargs):
+        Path(destination).write_bytes(b"partial database")
+        raise OSError("disk full during copy")
+
+    monkeypatch.setattr(shutil, "copy2", disk_full)
+    bm.refresh_profile_path()
+    bm.run_profile_backup_tasks()
+    assert (backup / "ankimon.db").read_bytes() == original
+    assert len(bm.get_backups()) == 1  # Original remains available for restore.
+    assert not list(bm.backups_path.glob("backup_*"))
+
+
+def test_migration_failed_source_cleanup_keeps_published_save(mock_env, monkeypatch):
+    import shutil
+
+    bm, _, backup = _legacy_migration_save(mock_env)
+    original = (backup / "ankimon.db").read_bytes()
+    real_rmtree = shutil.rmtree
+
+    def failed_cleanup(path, *args, **kwargs):
+        if Path(path) == backup:
+            (backup / "ankimon.db").unlink()
+            raise PermissionError("source cleanup interrupted")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", failed_cleanup)
+    bm.refresh_profile_path()
+    bm.run_profile_backup_tasks()
+    assert len(bm.get_backups()) == 1
+    assert (bm.backups_path / backup.name / "ankimon.db").read_bytes() == original
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs privileges on Windows")
+def test_migration_preserves_nested_relative_db_link(mock_env):
+    bm, root, backup = _legacy_migration_save(mock_env)
+    archive = root.parent / "archive"
+    archive.mkdir()
+    referent = archive / "original.db"
+    (backup / "ankimon.db").rename(referent)
+    original = referent.read_bytes()
+    (backup / "ankimon.db").symlink_to("../../archive/original.db")
+
+    bm.refresh_profile_path()
+    bm.run_profile_backup_tasks()
+
+    migrated = bm.backups_path / backup.name / "ankimon.db"
+    assert migrated.is_symlink()
+    assert migrated.resolve() == referent
+    assert migrated.read_bytes() == original
+    assert len(bm.get_backups()) == 1
+    assert not root.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs privileges on Windows")
+@pytest.mark.parametrize("link_first", [False, True])
+def test_migration_maps_links_to_collision_renamed_sibling(mock_env, monkeypatch, link_first):
+    bm, root, backup = _legacy_migration_save(mock_env)
+    original = (backup / "ankimon.db").read_bytes()
+    alias = root / "backup_2026-09-25_13-00-00"
+    alias.symlink_to(backup.name, target_is_directory=True)
+    linked_backup = root / "backup_2026-09-25_14-00-00"
+    linked_backup.mkdir()
+    (linked_backup / "ankimon.db").symlink_to(f"../{backup.name}/ankimon.db")
+    existing = bm.backups_path / backup.name
+    existing.mkdir()
+    _seed_db(existing / "ankimon.db", "Existing", 999)
+    existing_bytes = (existing / "ankimon.db").read_bytes()
+    real_iterdir = Path.iterdir
+
+    def ordered_entries(path):
+        if path == root:
+            entries = [alias, linked_backup, backup] if link_first else [backup, linked_backup, alias]
+            return iter(entries)
+        return real_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", ordered_entries)
+    bm.refresh_profile_path()
+    bm.run_profile_backup_tasks()
+
+    assert not root.exists()
+    assert (existing / "ankimon.db").read_bytes() == existing_bytes
+    migrated = next(bm.backups_path.glob(f"{backup.name}__legacy_*"))
+    assert (bm.backups_path / alias.name).resolve() == migrated
+    nested = bm.backups_path / linked_backup.name / "ankimon.db"
+    assert nested.resolve() == migrated / "ankimon.db"
+    assert nested.read_bytes() == original
+    assert len(bm.get_backups()) == 4
