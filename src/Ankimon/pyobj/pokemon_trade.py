@@ -328,7 +328,7 @@ def show_monthly_challenge_dialog(challenge_pokemon, description, parent_window=
     shiny_text = " (Shiny !!)" if challenge_pokemon.get("shiny", False) else ""
     title_label = QLabel(
         f"<span style='font-size: 1.2rem; font-weight: 800; letter-spacing: -0.3px; color: {text};'>"
-        f"!! You've received your monthly challenge Pokémon: "
+        f"!! Monthly Challenge Pokémon is here!: "
         f"<b>{escape(challenge_pokemon['name'])}{shiny_text}</b></span>"
     )
     title_label.setWordWrap(True)
@@ -374,9 +374,8 @@ def show_monthly_challenge_dialog(challenge_pokemon, description, parent_window=
     layout.addLayout(content_layout)
 
     discord_label = QLabel(
-        f'For more information on monthly challenges and to redeem higher-tier prizes (spoiler: where Shinies are involved!)'
-        f' for your performance, please check the '
-        f'<a href="https://discord.gg/Fd6fZYQx4r" style="color: {accent_blue}; text-decoration: none;">Ankimon Discord</a>!'
+        f'For more information, please check the '
+        f'<a href="https://discord.gg/hcq53X5mcu" style="color: {accent_blue}; text-decoration: none;">Ankimon Discord</a>!'
     )
     discord_label.setWordWrap(True)
     discord_label.setStyleSheet(f"color: {text}; font-size: 0.85rem;")
@@ -905,6 +904,9 @@ def check_and_award_monthly_pokemon(logger, defer=True, *, reclaim=False):
         accepted = show_monthly_challenge_dialog(new_pokemon, description, parent_window=mw)
         if not _session_unchanged(db, db_token, col):
             logger.log("warning", "Discarded the monthly challenge decision: the Ankimon database or Anki profile changed while the dialog was open.")
+            return
+        if db.get_user_data("rate_this") not in (True, "true"):
+            logger.log("info", "Discarded the monthly challenge decision: rating eligibility changed while the dialog was open.")
             return
         current_state = (db.get_user_data("monthly_challenge_id"), db.get_user_data("monthly_challenge", 0))
         if current_state != offered_state or db.get_pokemon(challenge_individual_id) is not None:

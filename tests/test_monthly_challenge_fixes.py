@@ -744,3 +744,15 @@ def test_save_error_dialog_switch_cannot_write_new_account(monthly_case):
     assert c.state["monthly_challenge_id"] == "B"
     assert c.state["monthly_challenge"] == 2
     c.db.set_monthly_challenge_state.assert_not_called()
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_decision_preserves_remote_rating_eligibility_check(monthly_case, accepted):
+    c = monthly_case
+    def change_eligibility(*args, **kwargs):
+        c.state["rate_this"] = False
+        return accepted
+    c.decision.side_effect = change_eligibility
+    check_and_award_monthly_pokemon(MockLogger(), defer=False)
+    c.add.assert_not_called()
+    c.db.set_monthly_challenge_state.assert_not_called()
