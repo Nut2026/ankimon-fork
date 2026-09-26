@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Backup Manager</title>
+	<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+	<link rel="stylesheet" href="../../ankimon_items_web/shop.css?v=20260634">
+	<link rel="stylesheet" href="../../ankimon_items_web/nav-switcher.css?v=20260634">
+	<link rel="stylesheet" href="backup_manager.css?v=20260634">
+	<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+</head>
+<body class="dark-mode">
+	<div class="app-container">
+		<aside class="sidebar">
+			<div class="sidebar-header">
+				<div id="nav-switcher" class="nav-switcher">
+					<button id="nav-trigger" class="nav-trigger" type="button" aria-haspopup="true" aria-expanded="false">
+						<img src="../../user_files/sprites/items/skull-fossil.png" class="app-logo icon-item-sprite" alt="">
+						<h1>BACKUP MANAGER</h1>
+						<span class="nav-chevron">▾</span>
+					</button>
+					<div id="nav-menu" class="nav-menu hidden" role="menu">
+						<button class="nav-menu-item" role="menuitem" data-screen="items"><span class="nav-menu-icon"><img src="../../user_files/sprites/items/max-potion.png" class="icon-item-sprite" alt=""></span><div class="nav-menu-text"><span class="nav-menu-title">Items</span><span class="nav-menu-desc">Your inventory and today's Mart</span></div></button>
+						<button class="nav-menu-item" role="menuitem" data-screen="ankidex"><span class="nav-menu-icon"><img src="../../user_files/sprites/items/poke-ball.png" alt=""></span><div class="nav-menu-text"><span class="nav-menu-title">Ankidex</span><span class="nav-menu-desc">Browse caught Pokémon</span></div></button>
+						<button class="nav-menu-item" role="menuitem" data-screen="team"><span class="nav-menu-icon"><img src="../../user_files/sprites/items/great-ball.png" class="icon-item-sprite" alt=""></span><div class="nav-menu-text"><span class="nav-menu-title">Team</span><span class="nav-menu-desc">Your active 6 Pokémon</span></div></button>
+						<button class="nav-menu-item" role="menuitem" data-screen="profile"><span class="nav-menu-icon"><img src="../../user_files/sprites/items/water-gem.png" class="icon-item-sprite" alt=""></span><div class="nav-menu-text"><span class="nav-menu-title">Profile</span><span class="nav-menu-desc">Card, badges &amp; avatar</span></div></button>
+						<button class="nav-menu-item" role="menuitem" data-screen="settings"><span class="nav-menu-icon"><img src="../../user_files/sprites/items/x-speed.png" class="icon-item-sprite" alt=""></span><div class="nav-menu-text"><span class="nav-menu-title">Settings</span><span class="nav-menu-desc">Configure Ankimon</span></div></button>
+						<button class="nav-menu-item" role="menuitem" data-screen="mobile"><span class="nav-menu-icon"><img src="../../user_files/sprites/items/elixir.png" class="icon-item-sprite" alt=""></span><div class="nav-menu-text"><span class="nav-menu-title">Mobile &amp; Web Reviews</span><span class="nav-menu-desc">Pending mobile/web battles</span></div></button>
+						<button class="nav-menu-item active" role="menuitem" data-screen="backup_manager"><span class="nav-menu-icon"><img src="../../user_files/sprites/items/skull-fossil.png" class="icon-item-sprite" alt=""></span><div class="nav-menu-text"><span class="nav-menu-title">Backup Manager</span><span class="nav-menu-desc">Create and restore backups</span></div></button>
+					</div>
+				</div>
+			</div>
+			<nav class="sidebar-nav">
+				<div class="nav-group">
+					<label>Actions</label>
+					<button id="manual-backup-btn" class="nav-item nav-action">Create New Backup</button>
+					<button id="open-folder-btn" class="nav-item nav-action">View Backup Files</button>
+				</div>
+			</nav>
+		</aside>
+		<main class="main-content">
+			<header class="top-bar"><div class="top-bar-titles"><h2>Backup Manager</h2></div><div class="top-actions"><button id="close-btn" class="btn btn-secondary">Close</button></div></header>
+			<div class="content-scroll"><section class="backup-content"><div class="backup-heading"><h2>Available Backups</h2></div><div id="backup-list" class="backup-list"></div></section></div>
+		</main>
+	</div>
+	<div id="backup-modal" class="backup-modal hidden" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title">
+		<div class="backup-modal-card">
+			<h2 id="backup-modal-title">Create New Backup</h2>
+			<p id="backup-modal-message">Create a new backup of your current Ankimon data?</p>
+			<div class="backup-modal-actions"><button id="backup-modal-cancel" class="btn btn-secondary">Cancel</button><button id="backup-modal-confirm" class="btn btn-primary">Create Backup</button></div>
+		</div>
+	</div>
+	<div id="toast" class="shop-toast"></div>
+	<script src="../../ankimon_items_web/nav-switcher.js?v=20260634"></script>
+	<script src="backup_manager.js?v=20260634"></script>
+</body>
+</html>
