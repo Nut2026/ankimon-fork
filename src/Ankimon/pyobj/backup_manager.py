@@ -936,10 +936,27 @@ class BackupManager:
                         f"database ({target.name})."
                     )
                     return
-                pending = stage_import(
-                    backup_file, target, sanitize_credentials=False,
-                    retain_unverified=retain_unverified,
-                )
+                # Even a read-only SQLite connection can create WAL/SHM files
+                # beside a backup. Keep the journaled migration tree unchanged
+                # by opening only a private copy, including committed WAL data.
+                # Resolve links just as stage_import's SQLite URI does, so the
+                # journals come from the actual database's directory.
+                source = backup_file.resolve()
+                private = Path(tempfile.mkdtemp(prefix="ankimon-backup-restore-"))
+                try:
+                    snapshot = private / source.name
+                    for suffix in ("", "-wal", "-journal"):
+                        journal = Path(str(source) + suffix)
+                        if not suffix or journal.exists():
+                            shutil.copyfile(journal, private / journal.name)
+                    pending = stage_import(
+                        snapshot, target, sanitize_credentials=False,
+                        retain_unverified=retain_unverified,
+                    )
+                finally:
+                    # Cleanup cannot turn a successfully armed restore into a
+                    # reported staging failure. Windows may still hold a file.
+                    self._discard_migration_staging(private)
             finally:
                 self._profile_work_lock.release()
         except ImportAlreadyPendingError:
@@ -1033,7 +1050,7 @@ class BackupManager:
             plan = self._migration_plan(legacy, self.backups_path)
         except (OSError, ValueError, KeyError, TypeError):
             # Unknown metadata cannot justify deleting possible recovery copies.
-            return set(self.backups_path.glob("backup_*")) | set(legacy.glob("backup_*"))
+            return set(self.backups_path.glob("*")) | set(legacy.glob("*"))
         return {legacy / name for name in plan} | {
             self.backups_path / name for name in plan.values()
         }
@@ -1206,6 +1223,16 @@ class BackupManager:
                 if p.is_dir() or p.is_symlink()]
 
     def _sweep_leftovers(self, deadline: float = None, leftovers: List[Path] = None):
+        # Failed backup attempts also call this directly, outside retention's
+        # lock. Do not race a worker publishing new migration entries.
+        if not self._profile_work_lock.acquire(blocking=False):
+            return
+        try:
+            return self._sweep_leftovers_locked(deadline, leftovers)
+        finally:
+            self._profile_work_lock.release()
+
+    def _sweep_leftovers_locked(self, deadline: float = None, leftovers: List[Path] = None):
         """Remove abandoned staging directories and unfinished removals.
 
         Neither is a backup anyone can list or restore, so unlike retention this
@@ -1215,6 +1242,7 @@ class BackupManager:
         """
         if self.backups_path is None:
             return
+        protected = self._migration_protected_paths()
         if leftovers is None:
             leftovers = self._discarded()
 
@@ -1225,6 +1253,8 @@ class BackupManager:
         # Age-gated because the name is only reserved while an attempt is live,
         # and a snapshot takes seconds, never an hour.
         for staging in self.backups_path.glob(".backup_*"):
+            if staging in protected:
+                continue
             try:
                 if not staging.is_dir():
                     continue
@@ -1239,6 +1269,8 @@ class BackupManager:
             self.backups_path.glob(f"{self.MIGRATING_PREFIX}*")
         )
         for migrating in migrating_entries:
+            if migrating in protected:
+                continue
             try:
                 if not migrating.is_dir() or self._is_link(migrating):
                     continue
@@ -1252,6 +1284,8 @@ class BackupManager:
         # What an earlier pass renamed out of the listing but could not finish
         # deleting -- stopped by the deadline, or by a locked file -- ends here.
         for leftover in leftovers:
+            if leftover in protected:
+                continue
             if not self._discard(leftover, "discarded backup", deadline):
                 return
 

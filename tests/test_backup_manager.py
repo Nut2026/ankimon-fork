@@ -1950,3 +1950,160 @@ def test_migration_flushes_writable_copy_before_restoring_readonly_mode(mock_env
         for base in (root, bm.backups_path):
             for path in base.rglob("ankimon.db"):
                 path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+
+@pytest.mark.parametrize("hidden_name", [".backup_abandoned", ".discard_abandoned"])
+@pytest.mark.parametrize("failed_backup", [False, True])
+def test_leftover_sweep_preserves_journaled_migration_copies(
+    mock_env, monkeypatch, hidden_name, failed_backup,
+):
+    import shutil
+
+    bm, _, _, addon = mock_env
+    root = addon.parent / "ankimon_backups"
+    hidden = root / hidden_name
+    hidden.mkdir(parents=True)
+    (hidden / "ankimon.db").write_bytes(b"abandoned copy")
+    os.utime(hidden, (0, 0))
+    original = root / "backup_locked"
+    original.mkdir()
+    _seed_db(original / "ankimon.db", "Legacy", 111)
+    real_iterdir = Path.iterdir
+
+    def ordered_entries(path):
+        if path == root:
+            return iter(p for p in (hidden, original) if p.exists())
+        return real_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", ordered_entries)
+    real_rmtree = shutil.rmtree
+
+    def refuse_last_source(path, *args, **kwargs):
+        if Path(path) == original:
+            raise PermissionError("source cleanup interrupted")
+        return real_rmtree(path, *args, **kwargs)
+
+    with monkeypatch.context() as locked:
+        locked.setattr(shutil, "rmtree", refuse_last_source)
+        bm.run_profile_backup_tasks()
+    published = bm.backups_path / hidden_name
+    assert not hidden.exists()
+    assert published.is_dir()
+    unrelated = bm.backups_path / (hidden_name + "_unrelated")
+    unrelated.mkdir()
+    os.utime(unrelated, (0, 0))
+
+    if failed_backup:
+        with patch.object(bm, "_snapshot_database", side_effect=OSError("disk full")):
+            assert not bm.create_backup()
+    else:
+        bm.cleanup_backups()
+
+    assert published.is_dir(), "the only remaining journaled copy was swept"
+    assert not unrelated.exists(), "unrelated leftovers should still be swept"
+    bm.run_profile_backup_tasks()
+    assert not root.exists()
+    assert not (bm.backups_path / bm.MIGRATION_RECORD).exists()
+    bm.cleanup_backups()
+    assert not published.exists(), "completed migrations must release hidden copies"
+
+
+def test_damaged_migration_record_also_protects_hidden_copies(mock_env):
+    bm, _, _, _ = mock_env
+    copies = [bm.backups_path / name for name in (".backup_old", ".discard_old")]
+    for copy in copies:
+        copy.mkdir()
+        os.utime(copy, (0, 0))
+    journal = bm.backups_path / bm.MIGRATION_RECORD
+    journal.write_text("invalid JSON", encoding="utf-8")
+
+    bm._sweep_leftovers()
+    assert all(copy.exists() for copy in copies)
+    journal.unlink()
+    bm._sweep_leftovers()
+    assert not any(copy.exists() for copy in copies)
+
+
+def test_direct_leftover_sweep_does_not_race_migration(mock_env):
+    from concurrent.futures import ThreadPoolExecutor
+
+    bm, _, _, _ = mock_env
+    stale = bm.backups_path / ".backup_old"
+    stale.mkdir()
+    os.utime(stale, (0, 0))
+    entered, release = threading.Event(), threading.Event()
+
+    def migrating():
+        with bm._profile_work_lock:
+            entered.set()
+            assert release.wait(5)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(migrating)
+        try:
+            assert entered.wait(5)
+            bm._sweep_leftovers()
+            assert stale.exists()
+        finally:
+            release.set()
+            future.result(5)
+    bm._sweep_leftovers()
+    assert not stale.exists()
+
+
+@pytest.mark.parametrize("committed_wal", [False, True])
+@pytest.mark.parametrize("linked", [False, pytest.param(
+    True, marks=pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges"),
+)])
+def test_restore_preserves_migration_digest_and_committed_wal(
+    mock_env, monkeypatch, committed_wal, linked,
+):
+    import shutil
+    from Ankimon.save_import import cancel_pending_import, pending_import_info
+
+    bm, root, original = _legacy_migration_save(mock_env)
+    source = original / "ankimon.db"
+    if linked:
+        external = root.parent / "external.db"
+        source.rename(external)
+        source.symlink_to(external)
+        source = external
+    writer = sqlite3.connect(source)
+    writer.execute("PRAGMA journal_mode=WAL")
+    expected_name = "Legacy"
+    if committed_wal:
+        writer.execute("UPDATE config SET value='In WAL' WHERE key='trainer.name'")
+        writer.commit()
+        expected_name = "In WAL"
+        assert Path(str(source) + "-wal").stat().st_size > 0
+    else:
+        writer.close()
+    real_rmtree = shutil.rmtree
+
+    def refuse_source_cleanup(path, *args, **kwargs):
+        if Path(path) == original:
+            raise PermissionError("legacy source remains locked")
+        return real_rmtree(path, *args, **kwargs)
+
+    try:
+        with monkeypatch.context() as locked:
+            locked.setattr(shutil, "rmtree", refuse_source_cleanup)
+            bm.run_profile_backup_tasks()
+        published = bm.backups_path / original.name
+        before = bm._migration_digest(published)
+        bm.restore_backup(str(published))
+        pending = pending_import_info(mock_env[1].db_path)
+        assert pending is not None
+        with closing(sqlite3.connect(pending["pending_path"])) as staged:
+            assert staged.execute(
+                "SELECT value FROM config WHERE key='trainer.name'"
+            ).fetchone() == (expected_name,)
+        assert bm._migration_digest(published) == before
+        _bm_mod.showWarning.assert_not_called()
+    finally:
+        writer.close()
+        cancel_pending_import(mock_env[1].db_path)
+
+    bm.run_profile_backup_tasks()
+    assert not root.exists()
+    assert not (bm.backups_path / bm.MIGRATION_RECORD).exists()
