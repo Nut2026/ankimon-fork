@@ -1,6 +1,7 @@
-"""Unified shell window — Items (Mart + Bag) and Ankidex live in one QDialog.
+"""Unified shell window — Items (Mart + Bag), Ankidex, Profile, Team, Settings,
+and Mobile all live in one QDialog.
 
-The same QWebEngineView swaps between two screens by changing its URL. No
+The same QWebEngineView swaps between screens by changing its URL. No
 window close/open flicker; the dropdown switcher in either screen calls back
 through QWebChannel to swap content in place.
 """
@@ -14,10 +15,29 @@ import traceback
 import threading
 import base64
 from datetime import datetime
+import requests
 from aqt import QDialog, QVBoxLayout, QWebEngineView, QWebEnginePage, mw
 from aqt.qt import Qt, QUrl, QFrame, QWebEngineProfile
-from PyQt6.QtCore import QObject, pyqtSlot, QTimer, QByteArray
-from PyQt6.QtGui import QColor, QIcon
+try:
+    from aqt.operations import QueryOp
+except ImportError:
+    class QueryOp:
+        def __init__(self, parent=None, op=None, success=None):
+            self.parent = parent
+            self.op = op
+            self.success = success
+        
+        def without_collection(self):
+            return self
+        
+        def run_in_background(self):
+            if self.op:
+                result = self.op(None)
+                if self.success:
+                    self.success(result)
+            return self
+from PyQt6.QtCore import QObject, pyqtSlot, QTimer, QByteArray, QVariant
+from PyQt6.QtGui import QColor, QDesktopServices, QIcon
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWidgets import QStackedWidget
 import csv
@@ -113,6 +133,7 @@ SCREEN_PROFILE = "profile"
 SCREEN_TEAM = "team"
 SCREEN_MOBILE = "mobile"
 SCREEN_HISTORY = "history"
+SCREEN_BACKUP = "backup_manager"
 
 SPRITE_VISIBILITY_SCREENS = (
     SCREEN_ITEMS,
@@ -120,6 +141,7 @@ SPRITE_VISIBILITY_SCREENS = (
     SCREEN_SETTINGS,
     SCREEN_PROFILE,
     SCREEN_TEAM,
+    SCREEN_BACKUP,
 )
 
 
@@ -165,6 +187,14 @@ class NavBridge(QObject):
     @pyqtSlot()
     def openHistory(self):
         self._w.load_screen(SCREEN_HISTORY)
+    
+    @pyqtSlot()
+    def openBackupManager(self):
+        self._w.load_screen(SCREEN_BACKUP)
+
+    @pyqtSlot()
+    def closeWindow(self):
+        self._w.close()
 
 
 class TrainerBridge(QObject):
@@ -1048,6 +1078,67 @@ class MobileBridge(QObject):
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+class BackupBridge(QObject):
+    """Backup-manager actions exposed to the Web UI."""
+
+    def __init__(self, window):
+        super().__init__()
+        self._w = window
+
+    @pyqtSlot(result="QVariant")
+    def getBackups(self):
+        try:
+            manager = self._w.backup_manager
+            return {
+                "backups": manager.get_backups(include_inactive=True),
+                "path": str(manager.backups_path or ""),
+            }
+        except Exception as error:
+            return {
+                "backups": [], "path": "", "error": str(error),
+                "traceback": traceback.format_exc(),
+            }
+
+    @pyqtSlot(result="QVariant")
+    def createBackup(self):
+        try:
+            manager = self._w.backup_manager
+            ok = bool(manager.create_backup(manual=False))
+            return {
+                "ok": ok,
+                "error": None if ok else manager.last_error,
+                "traceback": None if ok else manager.last_traceback,
+            }
+        except Exception as error:
+            return {"ok": False, "error": str(error), "traceback": traceback.format_exc()}
+
+    @pyqtSlot(str, result="QVariant")
+    def restoreBackup(self, backup_path):
+        return self._w.backup_manager.restore_backup(backup_path)
+
+    @pyqtSlot(str, result="QVariant")
+    def deleteBackup(self, backup_path):
+        try:
+            return self._w.backup_manager.delete_backup(backup_path)
+        except Exception as error:
+            return {"ok": False, "error": str(error), "traceback": traceback.format_exc()}
+
+    @pyqtSlot(result="QVariant")
+    def openBackupFolder(self):
+        try:
+            manager = self._w.backup_manager
+            path = manager.ensure_profile_path()
+            if not path:
+                return {"ok": False, "error": "Backup path is not initialized."}
+            if not path.exists():
+                return {"ok": False, "error": f"Backup path does not exist: {path}"}
+            if hasattr(os, "startfile"):
+                os.startfile(str(path))
+                return {"ok": True}
+            opened = bool(QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))))
+            return {"ok": opened, "error": None if opened else "Qt could not open the backup path."}
+        except Exception as error:
+            return {"ok": False, "error": str(error), "traceback": traceback.format_exc()}
 
 class AnkimonItemsWeb(QDialog):
     def __init__(
@@ -1059,6 +1150,7 @@ class AnkimonItemsWeb(QDialog):
         trainer_card=None,
         settings_obj=None,
         logger=None,
+        backup_manager=None,
     ):
         """
         Initialize the persistent web-based Ankimon interface and its data bridges.
@@ -1077,6 +1169,7 @@ class AnkimonItemsWeb(QDialog):
         self.shop_manager = shop_manager
         self.item_window = item_window
         self.ankimon_tracker = ankimon_tracker
+        self.backup_manager = backup_manager
 
         # Instantiate isolated, private browser profile to prevent Anki
         # and other addons from injecting conflicting scripts/stylesheets
@@ -1176,6 +1269,13 @@ class AnkimonItemsWeb(QDialog):
                 self.profile, SCREEN_HISTORY, logger, self.webview_history
             )
         )
+
+        self.webview_backup = QWebEngineView()
+        self.webview_backup.setPage(
+            SafeWebEnginePage(
+                self.profile, SCREEN_BACKUP, logger, self.webview_backup
+            )
+        )
         self._views = {
             SCREEN_ITEMS: self.webview_items,
             SCREEN_ANKIDEX: self.webview_ankidex,
@@ -1184,6 +1284,7 @@ class AnkimonItemsWeb(QDialog):
             SCREEN_TEAM: self.webview_team,
             SCREEN_MOBILE: self.webview_mobile,
             SCREEN_HISTORY: self.webview_history,
+            SCREEN_BACKUP: self.webview_backup,
         }
 
         self.bridge = ItemsBridge(self)
@@ -1192,6 +1293,7 @@ class AnkimonItemsWeb(QDialog):
         self.trainer_bridge = TrainerBridge(self)
         self.team_bridge = TeamBridge(self)
         self._mobile_bridge = MobileBridge(self)
+        self.backup_bridge = BackupBridge(self)
 
         # Each screen gets its own channel, but every channel registers the
         # same bridge objects so any page can navigate / call any action.
@@ -1206,6 +1308,7 @@ class AnkimonItemsWeb(QDialog):
             channel.registerObject("settings", self.settings_bridge)
             channel.registerObject("trainer", self.trainer_bridge)
             channel.registerObject("team", self.team_bridge)
+            channel.registerObject("backup", self.backup_bridge)
             if screen in (SCREEN_MOBILE, SCREEN_HISTORY):
                 channel.registerObject("mobile", self._mobile_bridge)
             view.page().setWebChannel(channel)
@@ -1265,6 +1368,10 @@ class AnkimonItemsWeb(QDialog):
                 title = "Ankimon — Mobile History"
                 target_view = self.webview_history
                 path = self.addon_dir / "ankimon_mobile_web" / "history.html"
+            elif screen == SCREEN_BACKUP:
+                title = "Ankimon — Backup Manager"
+                target_view = self.webview_backup
+                path = self.addon_dir / "ankimon_manager_web" / "backup_manager" / "backup_manager.html"
             else:
                 return
 
