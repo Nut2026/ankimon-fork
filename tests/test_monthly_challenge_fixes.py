@@ -756,3 +756,31 @@ def test_decision_preserves_remote_rating_eligibility_check(monthly_case, accept
     check_and_award_monthly_pokemon(MockLogger(), defer=False)
     c.add.assert_not_called()
     c.db.set_monthly_challenge_state.assert_not_called()
+
+
+@pytest.mark.parametrize("outcome", ["rejected", "owned", "offline"])
+def test_menu_request_during_automatic_fetch_keeps_explicit_intent(monthly_case, mock_requests, outcome):
+    c = monthly_case
+    c.state["monthly_challenge"] = 2
+    if outcome == "owned":
+        c.db.get_pokemon.return_value = {"name": "Pikachu", "level": 70, "pokemon_defeated": 42}
+    elif outcome == "offline":
+        mock_requests.side_effect = pokemon_trade_module.requests.exceptions.ConnectionError("offline")
+    with patch.object(pokemon_trade_module.services, "ui") as ui:
+        check_and_award_monthly_pokemon(MockLogger())
+        check_and_award_monthly_pokemon(MockLogger(), reclaim=True)
+        check_and_award_monthly_pokemon(MockLogger())
+        assert len(c.queued) == 1
+        task, done = c.queued.pop()
+        done(_Future(task()))
+        if outcome == "rejected":
+            c.decision.assert_called_once()
+            c.add.assert_called_once()
+            assert c.state["monthly_challenge"] == 1
+        else:
+            c.decision.assert_not_called()
+            c.add.assert_not_called()
+            kind, message = ui.notify.call_args.args
+            assert kind == ("info" if outcome == "owned" else "warning")
+            assert ("70" in message and "42" in message) if outcome == "owned" else "try again" in message
+        assert pokemon_trade_module.services._monthly_challenge_request is None

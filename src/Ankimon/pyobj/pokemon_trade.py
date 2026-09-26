@@ -795,7 +795,7 @@ def check_and_award_monthly_pokemon(logger, defer=True, *, reclaim=False):
         except Exception:
             return False
 
-    def _process_on_main_thread(result_data, db, db_token, col, current_month_str):
+    def _process_on_main_thread(result_data, db, db_token, col, current_month_str, reclaim):
         """Apply the fetched challenge to the database on the main thread."""
         if not _session_unchanged(db, db_token, col):
             logger.log("info", "Discarded the monthly challenge result: the Ankimon database or Anki profile changed while it was being fetched.")
@@ -941,11 +941,15 @@ def check_and_award_monthly_pokemon(logger, defer=True, *, reclaim=False):
         return
 
     pending = getattr(services, "_monthly_challenge_request", None)
-    if pending is not None and pending[0] is db and pending[1] == db_token and pending[2] is col:
+    if pending is not None and pending["db"] is db and pending["token"] == db_token and pending["col"] is col:
+        # A menu click during the fetch upgrades the automatic check. Once
+        # processing starts, nested requests share its existing dialog.
+        if pending["fetching"] and reclaim:
+            pending["reclaim"] = True
         return
     # Registry storage survives module reloads. Identity-based cleanup keeps
     # an old completion from releasing a newer session's pending request.
-    request = (db, db_token, col)
+    request = {"db": db, "token": db_token, "col": col, "reclaim": reclaim, "fetching": True}
     services._monthly_challenge_request = request
 
     def release():
@@ -954,7 +958,8 @@ def check_and_award_monthly_pokemon(logger, defer=True, *, reclaim=False):
 
     def _complete(result_data):
         try:
-            _process_on_main_thread(result_data, db, db_token, col, current_month_str)
+            request["fetching"] = False
+            _process_on_main_thread(result_data, db, db_token, col, current_month_str, request["reclaim"])
         except Exception as e:
             logger.log("error", f"Error completing monthly check: {e}")
         finally:

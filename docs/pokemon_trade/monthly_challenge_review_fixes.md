@@ -11,7 +11,10 @@ Pokemon remain in place.
 Another request for the same DB manager, generation and Anki collection is
 coalesced throughout fetching, processing and modal presentation. A new session
 can start immediately; an old callback can release only its own request.
-Fetch, dispatch and processing failures release the pending request for retry.
+A menu click during an automatic fetch upgrades the pending request to an explicit
+reclaim/progress request, including offline feedback. Requests made inside an
+existing dialog remain coalesced. Fetch, dispatch and processing failures release
+the pending request for retry.
 
 Profile connectivity callbacks capture the opening collection and discard
 results after that collection closes or changes. After the decision dialog,

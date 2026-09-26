@@ -202,14 +202,18 @@ def run(scenario):
             trade.show_monthly_challenge_dialog.side_effect = decision
             import Ankimon.menu_buttons as menus
             action = next(a for a in menus.profile_menu.actions() if a.objectName() == "ankimon_monthly_challenge")
+            trade.check_and_award_monthly_pokemon(logger)
             action.trigger()
+            assert len(queued) == 1
             finish()
             assert db.get_pokemon(iid) is not None
             assert db.get_user_data("monthly_challenge") == 1
             # Reopening an owned challenge reports progress without a new award.
             trade.show_monthly_challenge_dialog.reset_mock()
             with patch.object(d.services.ui, "notify") as notify:
+                trade.check_and_award_monthly_pokemon(logger)
                 action.trigger()
+                assert len(queued) == 1
                 finish()
                 notify.assert_called_once()
             trade.show_monthly_challenge_dialog.assert_not_called()
