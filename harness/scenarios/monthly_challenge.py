@@ -17,7 +17,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-SCENARIOS = ("overlap", "profile", "warning_switch", "refresh", "reclaim", "stale_decision", "sprites")
+SCENARIOS = ("overlap", "profile", "warning_switch", "refresh", "reclaim", "atomic_failure", "stale_decision", "sprites")
 
 
 def wide_gif():
@@ -217,6 +217,45 @@ def run(scenario):
                 finish()
                 notify.assert_called_once()
             trade.show_monthly_challenge_dialog.assert_not_called()
+
+        elif scenario == "atomic_failure":
+            db.set_monthly_challenge_state(iid, 2)
+            conn = db._get_connection()
+            conn.execute("""CREATE TRIGGER fail_monthly_accept BEFORE INSERT ON user_data
+                            WHEN NEW.key = 'monthly_challenge' AND NEW.value = '1'
+                            BEGIN SELECT RAISE(ABORT, 'injected monthly state failure'); END""").close()
+            conn.commit()
+            native_warning = trade.show_warning_with_traceback
+            warnings = []
+            def warning(*args, **kwargs):
+                def close_error():
+                    warnings.append("error")
+                    assert db.get_pokemon(iid) is None
+                    assert db.get_user_data("monthly_challenge") == 2
+                    assert not conn.in_transaction
+                    press("ok")
+                later(close_error)
+                return native_warning(*args, **kwargs)
+            import Ankimon.pyobj.error_handler as errors
+            import Ankimon.menu_buttons as menus
+            action = next(a for a in menus.profile_menu.actions() if a.objectName() == "ankimon_monthly_challenge")
+            with patch.object(trade, "show_warning_with_traceback", side_effect=warning), \
+                 patch.object(errors, "load_error_images", return_value={"path": "", "credit": "", "url": ""}), \
+                 patch.object(trade, "_refresh_collection") as refresh:
+                action.trigger()
+                finish()
+                assert warnings == ["error"]
+                refresh.assert_not_called()
+                trade.show_monthly_acceptance_dialog.assert_not_called()
+                assert d.services._monthly_challenge_request is None
+                conn.execute("DROP TRIGGER fail_monthly_accept").close()
+                conn.commit()
+                action.trigger()
+                finish()
+                refresh.assert_called_once()
+                trade.show_monthly_acceptance_dialog.assert_called_once()
+            assert db.get_pokemon(iid) is not None
+            assert db.get_user_data("monthly_challenge") == 1
 
         elif scenario == "stale_decision":
             def external_award(*args, **kwargs):

@@ -31,7 +31,9 @@ after refresh/error presentation before showing the acceptance notice.
 A failed save preserves the prior decision: unclaimed stays `0`, accepted stays
 `1` for automatic restoration, and an explicit reclaim failure stays rejected
 (`2`) until the user retries. There is no failure-state write after an error
-dialog. The existing atomic challenge-ID/status update is retained; no database
+dialog. The Pokemon row and accepted challenge-ID/status are written in one SQLite
+transaction, with rollback on either a statement or commit failure. Ownership
+cache invalidation and Pokedex updates follow the successful commit; no database
 transaction spans a modal dialog.
 
 ## Reclaim and sprite rendering
@@ -56,13 +58,18 @@ still prevents loading them.
   failure cleanup/retry, old callbacks completing after a newer request, stale
   decisions/ownership, save failure, and explicit reclaim. Existing session
   identity and accepted-restoration tests remain active.
+- `tests/test_database_manager.py`: failed metadata writes and failed commits
+  roll back both new and existing Pokemon for all three prior decision states;
+  independent SQLite readers verify durability, and successful retries preserve
+  the main-Pokemon flag and update the Pokedex.
 - `tests/test_profile_hooks.py`: old/new profile connectivity completions and
   closed-profile callbacks.
 - `harness/scenarios/monthly_challenge.py`: genuine offscreen Qt dialogs and
   SQLite, queued callbacks and actual button clicks. Covers duplicate requests,
   profile changes, a switch during a real error dialog after injected refresh
   failure, a committed award despite refresh failure, menu-driven rejection and
-  reclaim, a stale rejection after an external award, and sprite sizes/visibility.
+  reclaim while an automatic fetch is pending, atomic award failure and retry,
+  a stale rejection after an external award, and sprite sizes/visibility.
   It uses disposable saves and controlled HTTP responses; unrelated audio
   constructors are substituted. Set `ANKIMON_MONTHLY_SCREENSHOTS` to a directory
   to save both sprite sizes.
@@ -74,7 +81,7 @@ Run `python3 harness/check.py`, `python -m pytest tests/`, and
 profile-hook/menu changes also require the normal real-Anki startup smoke test.
 
 Validation on 2026-09-26: all nine Tier-1 checks passed; the full pytest suite
-passed with 1,124 passed and 40 skipped; all seven real-dialog scenarios passed.
+passed with 1,141 passed and 40 skipped; all eight real-dialog scenarios passed.
 A real Anki 26.08.1 launch in a disposable profile reached completed Ankimon
 startup and verified the new menu action after dismissing first-run onboarding.
 Native Qt tests required execution outside the restricted sandbox. Both the

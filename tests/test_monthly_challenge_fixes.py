@@ -549,7 +549,8 @@ def test_deferred_result_is_applied_when_database_is_unchanged(acceptance_dialog
     dialog_mock.assert_called_once()
     add_pokemon_mock.assert_called_once()
     acceptance_dialog_mock.assert_called_once()
-    assert mock_db.set_monthly_challenge_state.call_args_list == [call("test-id", 0), call("test-id", 1)]
+    mock_db.set_monthly_challenge_state.assert_called_once_with("test-id", 0)
+    assert add_pokemon_mock.call_args.kwargs["accept_monthly_challenge"] is True
 
 
 @pytest.mark.parametrize("accepted", [True, False])
@@ -624,6 +625,11 @@ def monthly_case(mock_db, mock_mw, mock_requests):
         _serve_january_challenge(date, mock_requests)
         decision = stack.enter_context(patch.object(pokemon_trade_module, "show_monthly_challenge_dialog", return_value=True))
         add = stack.enter_context(patch.object(pokemon_trade_module, "add_pokemon_to_collection", return_value=True))
+        def save_award(pokemon, **kwargs):
+            if add.return_value and kwargs.get("accept_monthly_challenge"):
+                state.update(monthly_challenge_id=pokemon["individual_id"], monthly_challenge=1)
+            return add.return_value
+        add.side_effect = save_award
         stack.enter_context(patch.object(pokemon_trade_module, "_refresh_collection"))
         stack.enter_context(patch.object(pokemon_trade_module, "show_monthly_acceptance_dialog"))
         stack.enter_context(patch.object(pokemon_trade_module, "show_monthly_rejection_dialog"))

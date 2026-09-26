@@ -1115,3 +1115,58 @@ def test_user_data_to_config_migration_rolls_back_on_write_failure(temp_env):
     assert db.get_user_data("username") == "legacy-user"
     assert db.get_user_data("api_key") == "legacy-key"
 
+
+
+@pytest.mark.parametrize("status", [0, 1, 2])
+@pytest.mark.parametrize("failure", ["metadata", "commit"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_monthly_award_rolls_back_collection_and_decision_then_retries(temp_env, status, failure, existing):
+    db, _ = temp_env
+    pokemon = {"individual_id": "atomic-monthly", "id": 25, "name": "pikachu", "level": 5}
+    original = {**pokemon, "id": 7, "name": "squirtle", "level": 70}
+    if existing:
+        db.save_pokemon(original)
+        db.execute("UPDATE captured_pokemon SET is_main = 1 WHERE individual_id = ?", (pokemon["individual_id"],)).close()
+        db._get_connection().commit()
+    db.set_monthly_challenge_state("previous-month", status)
+    conn = db._get_connection()
+    if failure == "metadata":
+        conn.execute("""CREATE TRIGGER fail_monthly_accept BEFORE INSERT ON user_data
+                        WHEN NEW.key = 'monthly_challenge' AND NEW.value = '1'
+                        BEGIN SELECT RAISE(ABORT, 'injected monthly state failure'); END""").close()
+        conn.commit()
+        fail_commit = contextlib.nullcontext()
+    else:
+        fail_commit = patch.object(conn, "commit", side_effect=sqlite3.OperationalError("database is locked"))
+    with patch.object(db, "_clear_reviewer_ownership_cache", wraps=db._clear_reviewer_ownership_cache) as clear_cache, \
+         patch.object(db, "mark_as_caught", wraps=db.mark_as_caught) as mark_caught:
+        with fail_commit, pytest.raises(sqlite3.DatabaseError):
+            db.save_pokemon(pokemon, accept_monthly_challenge=True)
+        clear_cache.assert_not_called()
+        mark_caught.assert_not_called()
+    assert not conn.in_transaction
+    assert db.get_pokemon(pokemon["individual_id"]) == (original if existing else None)
+    assert 25 not in db.get_caught_ids()
+    # An unrelated later commit must not accidentally persist the failed award.
+    db.set_user_data("unrelated-write", True)
+    with sqlite3.connect(str(db.db_path)) as reader:
+        assert dict(reader.execute("SELECT key, value FROM user_data WHERE key LIKE 'monthly_challenge%'")) == {
+            "monthly_challenge_id": "previous-month", "monthly_challenge": str(status),
+        }
+        row = reader.execute("SELECT data, is_main FROM captured_pokemon WHERE individual_id = ?", (pokemon["individual_id"],)).fetchone()
+        if existing:
+            assert db._deobfuscate(row[0]) == original and row[1] == 1
+        else:
+            assert row is None
+    if failure == "metadata":
+        conn.execute("DROP TRIGGER fail_monthly_accept").close()
+        conn.commit()
+    assert db.save_pokemon(pokemon, accept_monthly_challenge=True) is True
+    assert 25 in db.get_caught_ids()
+    with sqlite3.connect(str(db.db_path)) as reader:
+        assert dict(reader.execute("SELECT key, value FROM user_data WHERE key LIKE 'monthly_challenge%'")) == {
+            "monthly_challenge_id": pokemon["individual_id"], "monthly_challenge": "1",
+        }
+        row = reader.execute("SELECT data, is_main FROM captured_pokemon WHERE individual_id = ?", (pokemon["individual_id"],)).fetchone()
+        assert db._deobfuscate(row[0]) == pokemon
+        assert row[1] == int(existing)

@@ -167,15 +167,15 @@ def _refresh_collection(refresh_callback=None, parent_window=None):
         )
 
 
-def add_pokemon_to_collection(new_pokemon, refresh_callback=None, parent_window=None, *, refresh=True):
+def add_pokemon_to_collection(new_pokemon, refresh_callback=None, parent_window=None, *, refresh=True, accept_monthly_challenge=False):
     """Return whether persistence succeeded; presentation cannot undo a save.
 
-    Monthly awards defer refresh until their decision has also been persisted.
+    Monthly awards save the Pokemon and accepted decision in one transaction.
     The failure dialog can run an event loop, so callers must recheck their
     session before doing any further database work.
     """
     try:
-        if not services.db.save_pokemon(new_pokemon):
+        if not services.db.save_pokemon(new_pokemon, accept_monthly_challenge=accept_monthly_challenge):
             return False
     except Exception as e:
         show_warning_with_traceback(parent=parent_window, exception=e, message="Error adding Pokemon to collection")
@@ -878,14 +878,12 @@ def check_and_award_monthly_pokemon(logger, defer=True, *, reclaim=False):
             # No refresh or informational dialog until both the Pokemon and
             # its accepted decision are committed. A failed save may show an
             # error dialog, but never triggers a "rollback" into another save.
-            success = add_pokemon_to_collection(new_pokemon, parent_window=mw, refresh=False)
+            success = add_pokemon_to_collection(new_pokemon, parent_window=mw, refresh=False, accept_monthly_challenge=True)
             if not _session_unchanged(db, db_token, col):
                 return
             if not success:
                 logger.log("error", f"Failed to award {new_pokemon['name']}; keeping the previous challenge decision for a retry.")
                 return
-            if monthly_status != 1:
-                db.set_monthly_challenge_state(challenge_individual_id, 1)
             events.emit("monthly_challenge", decision="accepted", individual_id=challenge_individual_id, restored=monthly_status == 1)
             logger.log("info", f"Successfully awarded {new_pokemon['name']}{shiny_text}.")
             _refresh_collection(parent_window=mw)
