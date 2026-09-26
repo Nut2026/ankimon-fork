@@ -8,6 +8,8 @@ import sqlite3
 import tempfile
 import time
 import uuid
+import threading
+from copy import copy
 from contextlib import closing
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -38,6 +40,7 @@ class BackupManager:
     # taking it out of the listing and the count; a later pass finishes it.
     DISCARD_PREFIX = ".discard_"
     MIGRATING_PREFIX = ".migrating_"
+    MIGRATION_RECORD = ".legacy-migration.json"
 
     def __init__(self, logger, settings_obj):
         self.logger = logger
@@ -45,6 +48,8 @@ class BackupManager:
         self.user_files_path = user_path
         self.addon_path = addon_dir
         self.backups_path: Optional[Path] = None
+        self._profile_work_lock = threading.Lock()
+        self._startup_backup_pending = not getattr(services, "_is_reloading", False)
         self.refresh_profile_path()
 
     @staticmethod
@@ -134,6 +139,23 @@ class BackupManager:
             return str(referent)
 
     @staticmethod
+    def _migration_plan(source: Path, destination: Path) -> Dict[str, str]:
+        record = destination / BackupManager.MIGRATION_RECORD
+        if not record.exists():
+            return {}
+        data = json.loads(record.read_text(encoding="utf-8"))
+        if data["source"] != str(source.resolve()):
+            raise ValueError("Backup migration record belongs to another source")
+        plan = data["entries"]
+        if not isinstance(plan, dict) or any(
+            not isinstance(name, str) or name in ("", ".", "..")
+            or Path(name).name != name or "/" in name or "\\" in name
+            for pair in plan.items() for name in pair
+        ):
+            raise ValueError("Invalid backup migration record")
+        return plan
+
+    @staticmethod
     def _move_backup_contents(source: Path, destination: Path) -> None:
         """Copy, publish, then remove originals; never traverse directory links.
 
@@ -141,22 +163,39 @@ class BackupManager:
         refer to the final paths, including whole-directory collision renames.
         No source is deleted until every entry has been published successfully.
         """
-        planned = []
-        reserved = set()
+        plan = BackupManager._migration_plan(source, destination)
+        reserved = {destination / name for name in plan.values()}
+        reserved.add(destination / BackupManager.MIGRATION_RECORD)
         for item in source.iterdir():
+            if item.name in plan:
+                continue
             target = destination / item.name
             while target in reserved or target.exists() or BackupManager._is_link(target):
                 target = BackupManager._legacy_collision_name(destination / item.name)
-            planned.append((item, target))
+            plan[item.name] = target.name
             reserved.add(target)
 
+        # Reserve publication names durably before copying. An existing target
+        # on retry is a complete publication, even if source deletion was partial.
+        record = destination / BackupManager.MIGRATION_RECORD
+        temporary = record.with_name(f"{record.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as output:
+                json.dump({"source": str(source.resolve()), "entries": plan}, output)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, record)
+        finally:
+            temporary.unlink(missing_ok=True)
+        planned = [(source / name, destination / target) for name, target in plan.items()]
         relocations = {source.resolve(): destination.resolve()}
         relocations.update({
             item.resolve(): target.absolute()
             for item, target in planned if not BackupManager._is_link(item)
         })
         for item, target in planned:
-            BackupManager._publish_via_staging(item, target, relocations)
+            if not target.exists() and not BackupManager._is_link(target):
+                BackupManager._publish_via_staging(item, target, relocations)
         # If a copy/publication above fails, retain every original and any
         # already-published complete copies. Never delete a published snapshot
         # to roll back a different entry's failure.
@@ -169,7 +208,7 @@ class BackupManager:
             elif item.is_dir():
                 shutil.rmtree(item)
             else:
-                item.unlink()
+                item.unlink(missing_ok=True)
 
     @staticmethod
     def _legacy_collision_name(target: Path) -> Path:
@@ -178,7 +217,13 @@ class BackupManager:
     def _migrate_legacy_backups(self, profile_folder: Path) -> None:
         legacy_path = self.addon_path.parent / "ankimon_backups"
         new_path = profile_folder / "Ankimon_Backups"
-        if not legacy_path.exists() or legacy_path == new_path:
+        if legacy_path == new_path:
+            return
+        if not legacy_path.exists():
+            # A crash may occur between removing the empty source root and
+            # removing its record. No source remains to retry in that case.
+            if not self._is_link(new_path):
+                (new_path / self.MIGRATION_RECORD).unlink(missing_ok=True)
             return
         if self._is_link(legacy_path):
             self.logger.log(
@@ -196,6 +241,7 @@ class BackupManager:
         new_path.mkdir(parents=True, exist_ok=True)
         self._move_backup_contents(legacy_path, new_path)
         legacy_path.rmdir()
+        (new_path / self.MIGRATION_RECORD).unlink(missing_ok=True)
 
     def refresh_profile_path(self) -> None:
         self.backups_path = None
@@ -203,11 +249,6 @@ class BackupManager:
         profile_folder = self._active_profile_folder()
         if profile_folder is None:
             return
-
-        try:
-            self._migrate_legacy_backups(profile_folder)
-        except Exception as error:
-            self.logger.log("error", f"Failed to migrate legacy backups: {error}")
 
         candidate = profile_folder / "Ankimon_Backups"
         if self._is_link(candidate):
@@ -222,6 +263,59 @@ class BackupManager:
             self.logger.log("error", f"Failed to create backup directory: {error}")
             return
         self.backups_path = candidate
+
+    def run_profile_backup_tasks(self) -> None:
+        """Run on a worker; serialize startup and profile-open requests."""
+        with self._profile_work_lock:
+            if self.backups_path is None:
+                return  # Keep the startup request pending until a profile opens.
+            worker = copy(self)
+            try:
+                worker._migrate_legacy_backups(worker.backups_path.parent)
+            except Exception as error:
+                self.logger.log("error", f"Failed to migrate legacy backups: {error}")
+            if self.backups_path != worker.backups_path:
+                return
+            if self._startup_backup_pending:
+                if not self.settings_obj.get("misc.developer_mode"):
+                    self._startup_backup_pending = False
+                elif worker.create_backup(manual=False):
+                    self._startup_backup_pending = False
+
+    def schedule_profile_backup_tasks(self) -> None:
+        """Called on the GUI thread after resolving the profile path."""
+        from aqt import mw
+
+        def completed(future):
+            try:
+                future.result()
+            except Exception as error:
+                self.logger.log("error", f"Background backup work failed: {error}")
+
+        mw.taskman.run_in_background(self.run_profile_backup_tasks, completed)
+
+    def _backup_directories(self):
+        """Keep originals discoverable until their complete copies are published."""
+        roots = [self.backups_path]
+        legacy = self.addon_path.parent / "ankimon_backups"
+        plan = {}
+        if legacy.is_dir() and not self._is_link(legacy):
+            roots.append(legacy)
+            try:
+                plan = self._migration_plan(legacy, self.backups_path)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass  # A damaged record must not hide the original backups.
+        for root in roots:
+            try:
+                entries = sorted(root.iterdir(), reverse=True)
+            except OSError:
+                continue
+            for entry in entries:
+                if root == legacy and entry.name in plan:
+                    target = self.backups_path / plan[entry.name]
+                    if target.exists() or self._is_link(target):
+                        continue
+                yield entry
 
     def _deobfuscate_data(self, obfuscated_str: str) -> Optional[Dict[str, Any]]:
         """De-obfuscates string back into a dictionary."""
@@ -265,15 +359,15 @@ class BackupManager:
         if services.db is None:
             return backups
         active_db = services.db.db_path.name
-        for backup_dir in sorted(self.backups_path.iterdir(), reverse=True):
+        for backup_dir in self._backup_directories():
             if backup_dir.name.startswith("backup_") and backup_dir.is_dir():
                 # Only show a backup if it contains the database for the active mode.
                 if not (backup_dir / active_db).exists():
                     continue
                 summary_path = backup_dir / "summary.json"
                 if summary_path.exists():
-                    with open(summary_path, 'r', encoding='utf-8') as f:
-                        try:
+                    try:
+                        with open(summary_path, 'r', encoding='utf-8') as f:
                             summary = json.load(f)
                             # Shape the summary to match what the UI expects for the active DB.
                             stats_key = "dev_stats" if active_db == "ankimonDEV.db" else "normal_stats"
@@ -283,8 +377,8 @@ class BackupManager:
                             summary.update(db_stats)
                             summary['path'] = str(backup_dir)
                             backups.append(summary)
-                        except json.JSONDecodeError:
-                            self.logger.log("error", f"Could not read summary for backup: {backup_dir.name}")
+                    except (OSError, json.JSONDecodeError):
+                        self.logger.log("error", f"Could not read summary for backup: {backup_dir.name}")
                 elif active_db == "ankimon.db":
                     # Fallback for older backups without summary.json.
                     summary = {
@@ -829,6 +923,11 @@ class BackupManager:
         and retention, which orders by mtime, then kept those hidden remains as
         the newest backup and evicted a good one to make room for them.
         """
+        if self.backups_path is not None and (
+            self.backups_path / self.MIGRATION_RECORD
+        ).exists():
+            showWarning("Backups cannot be deleted while legacy migration is incomplete.")
+            return
         backup_path = Path(backup_path_str)
         if not backup_path.is_dir():
             showWarning("Selected backup path does not exist.")
@@ -931,6 +1030,8 @@ class BackupManager:
         """Deletes old backups based on retention policy."""
         if self.backups_path is None:
             return
+        if (self.backups_path / self.MIGRATION_RECORD).exists():
+            return  # Retry still depends on these published copies.
         # Taken before this pass renames anything, so a removal that fails now
         # is retried by the next pass rather than twice in this one.
         leftovers = self._discarded()
@@ -977,6 +1078,8 @@ class BackupManager:
         """
         if self.backups_path is None:
             return
+        if (self.backups_path / self.MIGRATION_RECORD).exists():
+            return  # Migration staging may still be in use by the worker.
         if leftovers is None:
             leftovers = self._discarded()
 

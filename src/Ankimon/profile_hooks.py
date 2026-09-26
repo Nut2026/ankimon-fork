@@ -286,6 +286,7 @@ def register_profile_hooks(
     def on_profile_did_open():
         try:
             backup_manager.refresh_profile_path()
+            backup_manager.schedule_profile_backup_tasks()
         except Exception as e:
             logger.log("error", f"Error updating backup profile path: {e}")
         did_open_handler()
