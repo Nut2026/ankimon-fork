@@ -1,6 +1,7 @@
 
 import base64
 import json
+import hashlib
 import os
 import shutil
 import datetime
@@ -48,7 +49,8 @@ class BackupManager:
         self.user_files_path = user_path
         self.addon_path = addon_dir
         self.backups_path: Optional[Path] = None
-        self._profile_work_lock = threading.Lock()
+        self._profile_work_lock = threading.RLock()
+        self._migrated_paths = {}
         self._startup_backup_pending = not getattr(services, "_is_reloading", False)
         self.refresh_profile_path()
 
@@ -69,8 +71,11 @@ class BackupManager:
         return _is_link(path)
 
     @staticmethod
-    def _publish_via_staging(source: Path, destination: Path, relocations=None) -> None:
+    def _publish_via_staging(source: Path, destination: Path, relocations=None,
+                             before_publish=None) -> None:
         """Publish a complete copy; leave the original for the caller to remove."""
+        from ..save_import import _fsync_directory
+
         destination.parent.mkdir(parents=True, exist_ok=True)
         staging = destination.with_name(
             f"{BackupManager.MIGRATING_PREFIX}{uuid.uuid4().hex[:8]}_{destination.name}"
@@ -79,7 +84,10 @@ class BackupManager:
             BackupManager._copy_migration_entry(source, staging, destination, relocations)
             if destination.exists() or BackupManager._is_link(destination):
                 raise FileExistsError(f"Backup migration collision: {destination}")
+            if before_publish is not None:
+                before_publish(staging)
             os.replace(str(staging), str(destination))
+            _fsync_directory(destination.parent)
         except Exception:
             # Staging is only a copy, including after an interrupted publication.
             BackupManager._discard_migration_staging(staging)
@@ -88,6 +96,8 @@ class BackupManager:
     @staticmethod
     def _copy_migration_entry(source, staging, destination, relocations):
         """Copy without following links; rebase links for their final location."""
+        from ..save_import import _fsync_directory, _fsync_file
+
         if BackupManager._is_link(source):
             target = BackupManager._relocate_link(source, destination, relocations)
             if target is None:
@@ -100,8 +110,13 @@ class BackupManager:
                     child, staging / child.name, destination / child.name, relocations,
                 )
             shutil.copystat(source, staging, follow_symlinks=False)
+            _fsync_directory(staging)
         else:
-            shutil.copy2(source, staging, follow_symlinks=False)
+            # Sync with write access before applying a source's read-only mode.
+            # Windows FlushFileBuffers rejects read-only handles.
+            shutil.copyfile(source, staging, follow_symlinks=False)
+            _fsync_file(staging)
+            shutil.copystat(source, staging, follow_symlinks=False)
 
     @staticmethod
     def _discard_migration_staging(staging: Path) -> None:
@@ -118,8 +133,6 @@ class BackupManager:
         try:
             referent = item.resolve(strict=False)
         except (OSError, RuntimeError):
-            return None
-        if not referent.exists() and not referent.is_symlink():
             return None
         # Resolve while every original still exists. Longest roots win so a
         # collision-renamed backup overrides the mapping of the legacy root.
@@ -139,10 +152,10 @@ class BackupManager:
             return str(referent)
 
     @staticmethod
-    def _migration_plan(source: Path, destination: Path) -> Dict[str, str]:
+    def _migration_record(source: Path, destination: Path) -> Dict[str, Any]:
         record = destination / BackupManager.MIGRATION_RECORD
         if not record.exists():
-            return {}
+            return {"source": str(source.resolve()), "entries": {}, "digests": {}}
         data = json.loads(record.read_text(encoding="utf-8"))
         if data["source"] != str(source.resolve()):
             raise ValueError("Backup migration record belongs to another source")
@@ -153,17 +166,80 @@ class BackupManager:
             for pair in plan.items() for name in pair
         ):
             raise ValueError("Invalid backup migration record")
-        return plan
+        digests = data.setdefault("digests", {})
+        if not isinstance(digests, dict) or any(
+            name not in plan or not isinstance(digest, str)
+            or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)
+            for name, digest in digests.items()
+        ):
+            raise ValueError("Invalid backup migration digests")
+        return data
 
     @staticmethod
-    def _move_backup_contents(source: Path, destination: Path) -> None:
-        """Copy, publish, then remove originals; never traverse directory links.
+    def _migration_plan(source: Path, destination: Path) -> Dict[str, str]:
+        return BackupManager._migration_record(source, destination)["entries"]
 
-        Plan every name first so nested links and links to sibling backups can
-        refer to the final paths, including whole-directory collision renames.
-        No source is deleted until every entry has been published successfully.
+    @staticmethod
+    def _write_migration_record(destination: Path, data) -> None:
+        from ..save_import import _fsync_directory
+
+        record = destination / BackupManager.MIGRATION_RECORD
+        temporary = record.with_name(f"{record.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as output:
+                json.dump(data, output)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, record)
+            _fsync_directory(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _migration_digest(path: Path) -> str:
+        """Fingerprint a publication's names, bytes and links without following links.
+
+        Saved BEFORE publication, this also identifies a complete copy after a
+        crash between publication and source deletion. Runs only on the worker.
         """
-        plan = BackupManager._migration_plan(source, destination)
+        digest = hashlib.sha256()
+
+        def field(value):
+            encoded = value.encode("utf-8", errors="surrogatepass")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+
+        def visit(entry):
+            if BackupManager._is_link(entry):
+                field("link")
+                field(os.readlink(entry))
+            elif entry.is_dir():
+                field("directory")
+                for child in sorted(entry.iterdir(), key=lambda item: item.name):
+                    field(child.name)
+                    visit(child)
+                field("end")
+            else:
+                field("file")
+                content = hashlib.sha256()
+                with entry.open("rb") as stream:
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        content.update(block)
+                digest.update(content.digest())
+
+        visit(path)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _move_backup_contents(source: Path, destination: Path, on_published=None) -> None:
+        """Publish verified copies before deleting any originals.
+
+        A reserved name is not proof of publication: another backup can occupy
+        it after a failed copy. Persist a digest of the completed staging tree
+        before renaming it, and require that proof on retries.
+        """
+        data = BackupManager._migration_record(source, destination)
+        plan, digests = data["entries"], data["digests"]
         reserved = {destination / name for name in plan.values()}
         reserved.add(destination / BackupManager.MIGRATION_RECORD)
         for item in source.iterdir():
@@ -174,19 +250,7 @@ class BackupManager:
                 target = BackupManager._legacy_collision_name(destination / item.name)
             plan[item.name] = target.name
             reserved.add(target)
-
-        # Reserve publication names durably before copying. An existing target
-        # on retry is a complete publication, even if source deletion was partial.
-        record = destination / BackupManager.MIGRATION_RECORD
-        temporary = record.with_name(f"{record.name}.{uuid.uuid4().hex}.tmp")
-        try:
-            with temporary.open("w", encoding="utf-8") as output:
-                json.dump({"source": str(source.resolve()), "entries": plan}, output)
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temporary, record)
-        finally:
-            temporary.unlink(missing_ok=True)
+        BackupManager._write_migration_record(destination, data)
         planned = [(source / name, destination / target) for name, target in plan.items()]
         relocations = {source.resolve(): destination.resolve()}
         relocations.update({
@@ -194,17 +258,37 @@ class BackupManager:
             for item, target in planned if not BackupManager._is_link(item)
         })
         for item, target in planned:
-            if not target.exists() and not BackupManager._is_link(target):
-                BackupManager._publish_via_staging(item, target, relocations)
-        # If a copy/publication above fails, retain every original and any
-        # already-published complete copies. Never delete a published snapshot
-        # to roll back a different entry's failure.
+            def record_copy(staging):
+                digests[item.name] = BackupManager._migration_digest(staging)
+                BackupManager._write_migration_record(destination, data)
 
-        for item, _ in planned:
+            if target.exists() or BackupManager._is_link(target):
+                expected = digests.get(item.name)
+                if expected is None:
+                    # Upgrade old journals only when the still-present original
+                    # proves which complete snapshot belongs at this target.
+                    staging = destination / f"{BackupManager.MIGRATING_PREFIX}{uuid.uuid4().hex}"
+                    try:
+                        BackupManager._copy_migration_entry(item, staging, target, relocations)
+                        expected = BackupManager._migration_digest(staging)
+                    finally:
+                        BackupManager._discard_migration_staging(staging)
+                if BackupManager._migration_digest(target) != expected:
+                    raise FileExistsError(f"Unverified backup migration destination: {target}")
+                digests[item.name] = expected
+                BackupManager._write_migration_record(destination, data)
+            else:
+                BackupManager._publish_via_staging(item, target, relocations, record_copy)
+            if on_published is not None:
+                on_published(item, target)
+
+        for item, target in planned:
+            if BackupManager._migration_digest(target) != digests[item.name]:
+                raise OSError(f"Backup migration destination changed: {target}")
             if item.is_symlink():
                 item.unlink()
             elif BackupManager._is_link(item):
-                item.rmdir()  # Windows junction: remove the link, not its target.
+                item.rmdir()
             elif item.is_dir():
                 shutil.rmtree(item)
             else:
@@ -239,7 +323,13 @@ class BackupManager:
             return
 
         new_path.mkdir(parents=True, exist_ok=True)
-        self._move_backup_contents(legacy_path, new_path)
+        for original in list(self._migrated_paths):
+            if original.parent == legacy_path:
+                del self._migrated_paths[original]
+        self._move_backup_contents(
+            legacy_path, new_path,
+            lambda original, relocated: self._migrated_paths.__setitem__(original, relocated),
+        )
         legacy_path.rmdir()
         (new_path / self.MIGRATION_RECORD).unlink(missing_ok=True)
 
@@ -292,9 +382,17 @@ class BackupManager:
             except Exception as error:
                 self.logger.log("error", f"Background backup work failed: {error}")
 
-        mw.taskman.run_in_background(self.run_profile_backup_tasks, completed)
+        try:
+            mw.taskman.run_in_background(
+                self.run_profile_backup_tasks, completed, uses_collection=False,
+            )
+        except TypeError as error:
+            if "unexpected keyword argument 'uses_collection'" not in str(error):
+                raise
+            # Anki 2.1.66 predates collection-specific workers and this keyword.
+            mw.taskman.run_in_background(self.run_profile_backup_tasks, completed)
 
-    def _backup_directories(self):
+    def _backup_directories(self, required_file=None):
         """Keep originals discoverable until their complete copies are published."""
         roots = [self.backups_path]
         legacy = self.addon_path.parent / "ankimon_backups"
@@ -313,7 +411,7 @@ class BackupManager:
             for entry in entries:
                 if root == legacy and entry.name in plan:
                     target = self.backups_path / plan[entry.name]
-                    if target.exists() or self._is_link(target):
+                    if self._resolve_backup_path(entry, required_file) == target:
                         continue
                 yield entry
 
@@ -359,7 +457,7 @@ class BackupManager:
         if services.db is None:
             return backups
         active_db = services.db.db_path.name
-        for backup_dir in self._backup_directories():
+        for backup_dir in self._backup_directories(active_db):
             if backup_dir.name.startswith("backup_") and backup_dir.is_dir():
                 # Only show a backup if it contains the database for the active mode.
                 if not (backup_dir / active_db).exists():
@@ -413,6 +511,8 @@ class BackupManager:
 
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         backup_dir = self.backups_path / f"backup_{timestamp}"
+        if backup_dir in self._migration_protected_paths():
+            backup_dir = backup_dir.with_name(f"{backup_dir.name}_{uuid.uuid4().hex[:8]}")
         staging_dir = self.backups_path / f".{backup_dir.name}"
 
         success = False
@@ -790,10 +890,13 @@ class BackupManager:
         while retaining credentials because Backup Manager snapshots are private
         local recovery material rather than portable exports.
         """
-        backup_path = Path(backup_path_str)
+        backup_path = self._resolve_backup_path(backup_path_str)
         if not backup_path.is_dir():
-            showWarning("Selected backup path does not exist.")
-            return
+            # Publication can complete between resolving and checking the row.
+            backup_path = self._resolve_backup_path(backup_path_str)
+            if not backup_path.is_dir():
+                showWarning("Selected backup path does not exist.")
+                return
 
         if not askUser(
             "Prepare this backup for restore? It will replace the current Ankimon "
@@ -817,14 +920,6 @@ class BackupManager:
                 return
 
             target = Path(services.db.db_path)
-            backup_file = backup_path / target.name
-            if not backup_file.is_file():
-                showWarning(
-                    "The selected backup does not contain a backup for the active "
-                    f"database ({target.name})."
-                )
-                return
-
             # A damaged save cannot give the verified copy the question above
             # promised, so its replacement needs its own answer.
             retain_unverified = should_confirm_unverified_copy(target)
@@ -833,10 +928,39 @@ class BackupManager:
             ):
                 return
 
-            pending = stage_import(
-                backup_file, target, sanitize_credentials=False,
-                retain_unverified=retain_unverified,
-            )
+            # Every confirmation can run the event loop while migration moves
+            # the selection. Resolve after ALL dialogs and hold its source
+            # stable until staging has finished, without waiting on the GUI.
+            if not self._profile_work_lock.acquire(blocking=False):
+                showWarning("Backups are being moved. Please try restoring again shortly.")
+                return
+            try:
+                backup_file = self._resolve_backup_path(backup_path_str, target.name) / target.name
+                if not backup_file.is_file():
+                    showWarning(
+                        "The selected backup does not contain a backup for the active "
+                        f"database ({target.name})."
+                    )
+                    return
+                # Even a read-only SQLite connection can create WAL/SHM files
+                # beside a backup. Keep the journaled migration tree unchanged
+                # by opening only a private copy, including committed WAL data.
+                # Resolve links just as stage_import's SQLite URI does, so the
+                # journals come from the actual database's directory.
+                source = backup_file.resolve()
+                private = Path(tempfile.mkdtemp(prefix="ankimon-backup-restore-"))
+                try:
+                    snapshot = self._copy_restore_source(source, private)
+                    pending = stage_import(
+                        snapshot, target, sanitize_credentials=False,
+                        retain_unverified=retain_unverified,
+                    )
+                finally:
+                    # Cleanup cannot turn a successfully armed restore into a
+                    # reported staging failure. Windows may still hold a file.
+                    self._discard_migration_staging(private)
+            finally:
+                self._profile_work_lock.release()
         except ImportAlreadyPendingError:
             # Guarded like the success notice below: showWarning reaches into
             # Qt, and an exception raised inside an except clause is not caught
@@ -915,7 +1039,93 @@ class BackupManager:
                 "active and the prepared restore remains pending."
             )
 
+    @staticmethod
+    def _copy_restore_source(source: Path, private: Path) -> Path:
+        """Copy a stable SQLite file family without opening the source in SQLite.
+
+        A linked backup may still be open in another process. A checkpoint
+        between copying its main file and WAL can otherwise produce a valid
+        but stale save. Verify identities, timestamps, membership and bytes;
+        retry changes before allowing stage_import to see the private copy.
+        """
+        from ..save_import import _digest
+
+        family = [Path(str(source) + suffix) for suffix in ("", "-wal", "-journal")]
+        deadline = time.monotonic() + 30.0
+
+        def signatures():
+            result = []
+            for member in family:
+                try:
+                    stat = member.stat()
+                except FileNotFoundError:
+                    result.append(None)
+                else:
+                    result.append((stat.st_dev, stat.st_ino, stat.st_size,
+                                   stat.st_mtime_ns, stat.st_ctime_ns))
+            return result
+
+        for _ in range(3):
+            if time.monotonic() >= deadline:
+                break
+            # A retry must not reuse a WAL that disappeared after the last copy.
+            for member in family:
+                (private / member.name).unlink(missing_ok=True)
+            before = signatures()
+            try:
+                if before[0] is None:
+                    raise FileNotFoundError(source)
+                present = [member for member, stamp in zip(family, before) if stamp is not None]
+                for member in present:
+                    shutil.copyfile(member, private / member.name)
+                if signatures() != before:
+                    continue
+                if any(_digest(member, deadline) != _digest(private / member.name, deadline)
+                       for member in present):
+                    continue
+                if signatures() == before:
+                    return private / source.name
+            except FileNotFoundError:
+                # Checkpoints and journal cleanup may remove a member mid-copy.
+                continue
+        raise OSError("The selected backup changed while being copied. Please try restoring again.")
+
+    def _resolve_backup_path(self, path, required_file=None) -> Path:
+        """Keep selections made before migration usable for this session."""
+        path = Path(path)
+        relocated = self._migrated_paths.get(path, path)
+        # A published directory can contain a rebased link to a sibling that
+        # failed to publish. Retain the usable original until that dependency
+        # exists; top-level directory links need the same fallback.
+        original_entry = path / required_file if required_file else path
+        relocated_entry = relocated / required_file if required_file else relocated
+        if not relocated_entry.exists() and original_entry.exists():
+            return path
+        return relocated
+
+    def _migration_protected_paths(self):
+        if self.backups_path is None:
+            return set()
+        legacy = self.addon_path.parent / "ankimon_backups"
+        try:
+            plan = self._migration_plan(legacy, self.backups_path)
+        except (OSError, ValueError, KeyError, TypeError):
+            # Unknown metadata cannot justify deleting possible recovery copies.
+            return set(self.backups_path.glob("*")) | set(legacy.glob("*"))
+        return {legacy / name for name in plan} | {
+            self.backups_path / name for name in plan.values()
+        }
+
     def delete_backup(self, backup_path_str: str):
+        if not self._profile_work_lock.acquire(blocking=False):
+            showWarning("Backup migration is running. Please try again shortly.")
+            return
+        try:
+            return self._delete_backup(backup_path_str)
+        finally:
+            self._profile_work_lock.release()
+
+    def _delete_backup(self, backup_path_str: str):
         """Deletes a selected backup.
 
         Renamed out of the ``backup_`` namespace first, as retention does. A
@@ -923,12 +1133,10 @@ class BackupManager:
         and retention, which orders by mtime, then kept those hidden remains as
         the newest backup and evicted a good one to make room for them.
         """
-        if self.backups_path is not None and (
-            self.backups_path / self.MIGRATION_RECORD
-        ).exists():
-            showWarning("Backups cannot be deleted while legacy migration is incomplete.")
+        backup_path = self._resolve_backup_path(backup_path_str)
+        if backup_path in self._migration_protected_paths():
+            showWarning("This backup is needed while legacy migration is incomplete.")
             return
-        backup_path = Path(backup_path_str)
         if not backup_path.is_dir():
             showWarning("Selected backup path does not exist.")
             return
@@ -1027,11 +1235,18 @@ class BackupManager:
         return finished
 
     def cleanup_backups(self, deadline: float = None):
+        if not self._profile_work_lock.acquire(blocking=False):
+            return
+        try:
+            return self._cleanup_backups(deadline=deadline)
+        finally:
+            self._profile_work_lock.release()
+
+    def _cleanup_backups(self, deadline: float = None):
         """Deletes old backups based on retention policy."""
         if self.backups_path is None:
             return
-        if (self.backups_path / self.MIGRATION_RECORD).exists():
-            return  # Retry still depends on these published copies.
+        protected = self._migration_protected_paths()
         # Taken before this pass renames anything, so a removal that fails now
         # is retried by the next pass rather than twice in this one.
         leftovers = self._discarded()
@@ -1039,7 +1254,7 @@ class BackupManager:
         # directories must not displace recoverable saves even if they remain.
         backups = sorted(
             [p for p in self.backups_path.iterdir()
-             if p.name.startswith("backup_") and p.is_dir()],
+             if p.name.startswith("backup_") and p.is_dir() and p not in protected],
             key=os.path.getmtime,
         )
 
@@ -1069,6 +1284,16 @@ class BackupManager:
                 if p.is_dir() or p.is_symlink()]
 
     def _sweep_leftovers(self, deadline: float = None, leftovers: List[Path] = None):
+        # Failed backup attempts also call this directly, outside retention's
+        # lock. Do not race a worker publishing new migration entries.
+        if not self._profile_work_lock.acquire(blocking=False):
+            return
+        try:
+            return self._sweep_leftovers_locked(deadline, leftovers)
+        finally:
+            self._profile_work_lock.release()
+
+    def _sweep_leftovers_locked(self, deadline: float = None, leftovers: List[Path] = None):
         """Remove abandoned staging directories and unfinished removals.
 
         Neither is a backup anyone can list or restore, so unlike retention this
@@ -1078,8 +1303,7 @@ class BackupManager:
         """
         if self.backups_path is None:
             return
-        if (self.backups_path / self.MIGRATION_RECORD).exists():
-            return  # Migration staging may still be in use by the worker.
+        protected = self._migration_protected_paths()
         if leftovers is None:
             leftovers = self._discarded()
 
@@ -1090,6 +1314,8 @@ class BackupManager:
         # Age-gated because the name is only reserved while an attempt is live,
         # and a snapshot takes seconds, never an hour.
         for staging in self.backups_path.glob(".backup_*"):
+            if staging in protected:
+                continue
             try:
                 if not staging.is_dir():
                     continue
@@ -1100,7 +1326,12 @@ class BackupManager:
             if not self._discard(staging, "incomplete backup", deadline):
                 return
 
-        for migrating in self.backups_path.glob(f"{self.MIGRATING_PREFIX}*"):
+        migrating_entries = [] if (self.backups_path / self.MIGRATION_RECORD).exists() else (
+            self.backups_path.glob(f"{self.MIGRATING_PREFIX}*")
+        )
+        for migrating in migrating_entries:
+            if migrating in protected:
+                continue
             try:
                 if not migrating.is_dir() or self._is_link(migrating):
                     continue
@@ -1114,6 +1345,8 @@ class BackupManager:
         # What an earlier pass renamed out of the listing but could not finish
         # deleting -- stopped by the deadline, or by a locked file -- ends here.
         for leftover in leftovers:
+            if leftover in protected:
+                continue
             if not self._discard(leftover, "discarded backup", deadline):
                 return
 
