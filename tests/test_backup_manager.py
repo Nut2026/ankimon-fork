@@ -1526,12 +1526,20 @@ def test_failed_migration_keeps_all_originals_discoverable(mock_env, monkeypatch
     assert not root.exists()
 
 
-def test_profile_refresh_schedules_without_copying_on_gui_thread(mock_env, monkeypatch):
+@pytest.mark.parametrize("legacy_taskman", [False, True])
+def test_profile_refresh_schedules_without_copying_on_gui_thread(mock_env, monkeypatch, legacy_taskman):
     from concurrent.futures import ThreadPoolExecutor
 
     bm, root, _ = _legacy_migration_save(mock_env)
     tasks = []
-    monkeypatch.setattr("aqt.mw.taskman.run_in_background", lambda task, done, **kwargs: tasks.append((task, kwargs)))
+    if legacy_taskman:
+        # Anki 2.1.66 has no uses_collection parameter and uses a shared pool.
+        def run_in_background(task, on_done=None, args=None):
+            tasks.append((task, {}))
+    else:
+        def run_in_background(task, on_done=None, args=None, uses_collection=True):
+            tasks.append((task, {"uses_collection": uses_collection}))
+    monkeypatch.setattr("aqt.mw.taskman.run_in_background", run_in_background)
     bm.refresh_profile_path()
     bm.schedule_profile_backup_tasks()
     assert root.exists()
@@ -1545,10 +1553,25 @@ def test_profile_refresh_schedules_without_copying_on_gui_thread(mock_env, monke
 
     monkeypatch.setattr(bm, "_migrate_legacy_backups", migrate)
     with ThreadPoolExecutor(max_workers=1) as pool:
-        assert tasks[0][1] == {"uses_collection": False}
+        assert len(tasks) == 1
+        assert tasks[0][1] == ({} if legacy_taskman else {"uses_collection": False})
         pool.submit(tasks[0][0]).result()
     assert not root.exists()
     assert all(thread is not threading.main_thread() for thread in seen_threads)
+
+
+@pytest.mark.parametrize("message", ["task scheduling failed", "invalid uses_collection value"])
+def test_profile_backup_scheduling_does_not_retry_unrelated_type_errors(mock_env, monkeypatch, message):
+    bm, _, _, _ = mock_env
+    error = TypeError(message)
+    schedule = MagicMock(side_effect=error)
+    monkeypatch.setattr("aqt.mw.taskman.run_in_background", schedule)
+
+    with pytest.raises(TypeError) as raised:
+        bm.schedule_profile_backup_tasks()
+
+    assert raised.value is error
+    schedule.assert_called_once()
 
 
 def test_developer_startup_backup_waits_for_profile_and_runs_once(mock_env, monkeypatch):

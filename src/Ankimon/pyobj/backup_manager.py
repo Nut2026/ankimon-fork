@@ -382,9 +382,15 @@ class BackupManager:
             except Exception as error:
                 self.logger.log("error", f"Background backup work failed: {error}")
 
-        mw.taskman.run_in_background(
-            self.run_profile_backup_tasks, completed, uses_collection=False,
-        )
+        try:
+            mw.taskman.run_in_background(
+                self.run_profile_backup_tasks, completed, uses_collection=False,
+            )
+        except TypeError as error:
+            if "unexpected keyword argument 'uses_collection'" not in str(error):
+                raise
+            # Anki 2.1.66 predates collection-specific workers and this keyword.
+            mw.taskman.run_in_background(self.run_profile_backup_tasks, completed)
 
     def _backup_directories(self, required_file=None):
         """Keep originals discoverable until their complete copies are published."""
