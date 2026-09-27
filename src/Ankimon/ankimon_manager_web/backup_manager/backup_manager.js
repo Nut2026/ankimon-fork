@@ -32,19 +32,11 @@
 				<div class="backup-cash">${money(backup.trainer_cash)}</div>`;
 			const actions = card.querySelector('.backup-actions');
 			actions.addEventListener('click', (event) => event.stopPropagation());
-			actions.querySelector('.restore-btn').addEventListener('click', () => {
+				actions.querySelector('.restore-btn').addEventListener('click', () => {
 				openModal(
-					'Restore Backup',
-					'This will immediately replace your current Ankimon save with this backup. Continue?',
-					() => backupBridge.restoreBackup(backup.path, (result) => {
-						if (result && result.ok) {
-							showToast('Backup restoration completed successfully! Feel free to continue Ankimon-ing!');
-							refresh();
-						} else {
-							console.error((result && result.traceback) || (result && result.error) || 'Backup restoration failed.');
-							showToast('Backup restoration failed. Please try again.', true);
-						}
-					}),
+					'Restore and Restart',
+					'This will replace your current Ankimon save with this backup and restart Anki. Continue?',
+					() => restoreBackup(backup.path),
 				);
 			});
 			actions.querySelector('.delete-btn').addEventListener('click', () => {
@@ -118,6 +110,28 @@
 			}
 			showToast('Backup successfully deleted!');
 			refresh();
+		});
+	}
+
+	function restoreBackup(path) {
+		if (!backupBridge || !path) {
+			showToast('Backup restoration failed. Please try again.', true);
+			return;
+		}
+		backupBridge.restoreBackup(path, (result) => {
+			if (!result || result.ok !== true) {
+				console.error((result && result.traceback) || (result && result.error) || 'Backup restoration failed.');
+				showToast('Backup restoration failed. Please try again.', true);
+				return;
+			}
+			showToast('Backup restoration succeeded! Restarting now...');
+			setTimeout(() => {
+				backupBridge.restartAnki((restartResult) => {
+					if (!restartResult || restartResult.ok !== true) {
+						console.error((restartResult && restartResult.error) || 'Anki could not be restarted.');
+					}
+				});
+			}, 500);
 		});
 	}
 
