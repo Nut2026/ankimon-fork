@@ -1263,7 +1263,9 @@ class AnkimonDB:
 
     # --- Captured Pokemon Operations ---
 
-    def save_pokemon(self, pokemon_data: Dict[str, Any], *, accept_monthly_challenge=False):
+    def save_pokemon(
+        self, pokemon_data: Dict[str, Any], *, accept_monthly_challenge=False
+    ):
         """Save a Pokemon, optionally accepting its monthly challenge atomically.
 
         Preserve an existing Pokemon's is_main flag. Cache invalidation and
@@ -1442,7 +1444,16 @@ class AnkimonDB:
 
         conn.commit()
         self._clear_reviewer_ownership_cache()
-        return cursor.rowcount > 0
+        replaced = cursor.rowcount > 0
+        # Trades acquire the incoming species just like a catch. Record it now
+        # so encounter unlocks and the HUD do not lag until the next startup's
+        # reconciliation sweep (or lose it if this Pokemon is traded again).
+        if replaced and pokemon_data.get("id"):
+            try:
+                self.mark_as_caught(int(pokemon_data["id"]))
+            except Exception as e:
+                self._log("error", f"Failed to mark traded pokemon as caught: {e}")
+        return replaced
 
     def get_pokemon_count(self) -> int:
         """Returns the count of captured pokemon."""
@@ -1887,7 +1898,9 @@ class AnkimonDB:
                 )
                 if cursor.rowcount == 0:
                     self.save_item(
-                        item.get("id"), item["item_name"], count,
+                        item.get("id"),
+                        item["item_name"],
+                        count,
                         extra_data=item.get("extra_data"),
                         category_id=item.get("category_id"),
                         cost=item.get("cost"),
@@ -2016,7 +2029,10 @@ class AnkimonDB:
         """Write both metadata keys inside the caller's transaction."""
         cursor.executemany(
             "INSERT OR REPLACE INTO user_data (key, value) VALUES (?, ?)",
-            (("monthly_challenge_id", str(challenge_id)), ("monthly_challenge", str(status))),
+            (
+                ("monthly_challenge_id", str(challenge_id)),
+                ("monthly_challenge", str(status)),
+            ),
         )
 
     def set_monthly_challenge_state(self, challenge_id: str, status: int):
@@ -2145,9 +2161,11 @@ class AnkimonDB:
         # read-modify-write (save_pokemon also runs on the mobile-sync thread).
         # Catching implies seeing, so both are recorded in the same transaction.
         with self._pokedex_lock:
-            self._append_pokedex_ids(
+            added = self._append_pokedex_ids(
                 {"pokedex_caught": (pokemon_id,), "pokedex_seen": (pokemon_id,)}
             )
+        if added.get("pokedex_caught"):
+            self._clear_reviewer_ownership_cache()
 
     def _reconcile_pokedex_history_safely(self):
         """``_reconcile_pokedex_history`` that can never stop the DB from opening."""

@@ -231,17 +231,13 @@ class Reviewer_Manager:
             self.main_pokemon.hp, self.main_pokemon.max_hp
         )
 
-        # 1. Ownership cache (avoid a DB query on every repaint of the same enemy).
+        # The Pokeball records a previous catch, including released or evolved
+        # Pokemon. Keep exact form IDs and cache the result for this encounter.
         is_pokemon_owned = self._ownership_cache.get(self.enemy_pokemon.id)
         if is_pokemon_owned is None:
             is_pokemon_owned = False
             try:
-                db = services.db
-                cursor = db.execute(
-                    "SELECT 1 FROM captured_pokemon WHERE pokedex_id = ? LIMIT 1",
-                    (self.enemy_pokemon.id,),
-                )
-                is_pokemon_owned = cursor.fetchone() is not None
+                is_pokemon_owned = self.enemy_pokemon.id in services.db.get_caught_ids()
                 self._ownership_cache[self.enemy_pokemon.id] = is_pokemon_owned
             except Exception:
                 pass
