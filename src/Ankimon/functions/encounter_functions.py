@@ -82,6 +82,9 @@ settings_obj = None
 translator = None
 ankimon_db = None
 pokemon_pc = None
+RARE_ENCOUNTER_TIERS = frozenset(
+    {"Starter", "Ultra", "Gmax", "Legendary", "Mega", "Mythical"}
+)
 
 
 def _disp_name(pokemon) -> str:
@@ -655,7 +658,7 @@ def clear_encounter_cache():
 
 
 def _player_owns_base_form(actual_id: int, collected_ids: set) -> bool:
-    """Return True if the player owns the base species of this Mega/Gmax form."""
+    """Return whether the caught-history snapshot includes this form's base."""
     name = search_pokedex_by_id(actual_id)
     if not name or name == "Pokémon not found":
         return True  # can't determine — allow through
@@ -666,7 +669,7 @@ def _player_owns_base_form(actual_id: int, collected_ids: set) -> bool:
 
 
 def _meets_prerequisites(pokemon_id: int, collected_ids: set) -> bool:
-    """Return True if all prerequisite Pokémon for this ID are collected.
+    """Check prerequisites against the caller's caught-history snapshot.
 
     Prerequisite chains are defined in encounter_data.PREREQUISITES.
     Handles forms by checking the species_id prerequisites.
@@ -933,7 +936,13 @@ def generate_random_pokemon(
     wild_pokemon_lvl = max(
         1, wild_pokemon_lvl
     )  # Ensures that the wild pokemon's level is at least 1
-    if main_pokemon_level == 100:
+
+    # Check level cap setting
+    remove_cap = settings_obj.get("misc.remove_level_cap", False)
+    if not remove_cap and wild_pokemon_lvl > 100:
+        wild_pokemon_lvl = 100
+
+    if main_pokemon_level == 100 and not remove_cap:
         wild_pokemon_lvl = 100
 
     collected_ids = kwargs.get("collected_ids", None)
@@ -1356,9 +1365,13 @@ def new_pokemon(
     if update_hud and reviewer_obj is not None:
         reviewer_obj.refresh_hud()
 
+    # Encounter tiers are names, not numeric ranks.
     # Show a popup message for rare/shiny Pokemon if the setting is enabled
-    if not _in_bulk_resolve() and settings_obj.get("gui.pop_up_dialog_message_on_encounter") is True:
-        if pokemon.shiny or pokemon.tier >= 4:
+    if (
+        not _in_bulk_resolve()
+        and settings_obj.get("gui.pop_up_dialog_message_on_encounter") is True
+    ):
+        if pokemon.shiny or pokemon.tier in RARE_ENCOUNTER_TIERS:
             if pokemon.shiny:
                 msg = f"A Shiny wild {get_pretty_name_for_name(pokemon.name)} appeared!"
             else:
@@ -1755,7 +1768,9 @@ def save_main_pokemon_progress(
                         translator.translate(
                             "pokemon_about_to_evolve_friendship",
                             main_pokemon_name=_disp_name(main_pokemon),
-                            evo_pokemon_name=_evo_display_name(friendship_evo_id, friendship_evo_name),
+                            evo_pokemon_name=_evo_display_name(
+                                friendship_evo_id, friendship_evo_name
+                            ),
                         ),
                     )
         mainpkmndata["pokemon_defeated"] = main_pokemon.pokemon_defeated
@@ -2156,9 +2171,10 @@ def handle_enemy_faint(
     replaced_encounter = True
     if auto_battle_setting == 3:  # Catch if uncollected
         enemy_id = enemy_pokemon.id
-        # Check cache instead of file
+        # Evolution, trades and imports can add history without updating the
+        # battle cache, so refresh once for this completed encounter.
         if (
-            enemy_id not in collected_pokemon_ids
+            enemy_id not in load_collected_pokemon_ids()
             or enemy_pokemon.shiny
             or should_catch_always
         ):
@@ -2259,7 +2275,7 @@ def handle_main_pokemon_faint(
     msg = translator.translate(
         "own_pokemon_fainted",
         main_pokemon_name=get_pretty_name_for_name(main_pokemon.name),
-        enemy_pokemon_name=get_pretty_name_for_name(enemy_pokemon.name)
+        enemy_pokemon_name=get_pretty_name_for_name(enemy_pokemon.name),
     )
     tooltipWithColour(msg, "#E12939")
     events.emit("faint", who="main", pokemon=main_pokemon.name)

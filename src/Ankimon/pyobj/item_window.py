@@ -1,5 +1,6 @@
 import random
 import csv
+import time
 from typing import Any, Optional
 
 from aqt import mw
@@ -509,8 +510,9 @@ class ItemWindow(QWidget):
                     "message": f"Failed to revive {fossil_pokemon_name}.",
                 }
             if name in self.escape_items:
-                self.Handle_EscapeItem(name)
-                return {"ok": True, "message": f"Escaped using {name}."}
+                if self.Handle_EscapeItem(name):
+                    return {"ok": True, "message": f"Escaped using {name}."}
+                return {"ok": False, "message": f"Could not escape using {name}."}
             if name in self.pokeball_chances:
                 self.Handle_Pokeball(name)
                 return {"ok": True, "message": f"Threw {name}."}
@@ -660,35 +662,91 @@ class ItemWindow(QWidget):
 
         return catch_chance
 
-    def Handle_EscapeItem(self, item_name: str):
-        # Notify the user
-        self.logger.log_and_showinfo(
-            "info", f"You used the {item_name} and successfully escaped the battle!"
-        )
-        self.delete_item(item_name)  # Consume the item
+    def Handle_EscapeItem(self, item_name: str) -> bool:
+        """Spend an escape item, replace the encounter, and record its outcome."""
+        if self.enemy_pokemon is None or self.main_pokemon is None:
+            self.logger.log_and_showinfo("error", "No active battle to escape.")
+            return False
 
-        # Log to mobile sync history if enabled
-        from ..services import services
-        from ..functions.mobile_sync import save_encounter_history
-        save_encounter_history(
-            None,
-            None,
-            None,
-            {"enemy_name": self.enemy_pokemon.name, "companion_name": self.main_pokemon.name},
-            "escaped"
-        )
-
-        # Reset the wild pokemon directly and update the window
+        # Resolve imports and the window before spending the item. A missing
+        # dependency must not leave the player with neither item nor escape.
         from ..functions.encounter_functions import new_pokemon
         from ..singletons import get_test_window, reviewer_obj
 
-        new_pokemon(
-            self.enemy_pokemon,
-            get_test_window(),
-            services.ankimon_tracker_obj,
-            reviewer_obj,
-            update_hud=True,
+        test_window = get_test_window()
+        enemy = self.enemy_pokemon
+        companion = self.main_pokemon
+        history = {
+            "timestamp": int(time.time() * 1000),
+            "enemy_id": enemy.id,
+            "enemy_name": enemy.name,
+            "enemy_level": enemy.level,
+            "enemy_shiny": enemy.shiny,
+            "companion_name": companion.name,
+            "companion_level": companion.level,
+            "companion_id": companion.individual_id,
+            "outcome": "escaped",
+            "xp_gained": 0,
+            "trainer_xp_gained": 0,
+            "cash_gained": 0,
+        }
+
+        item = services.db.get_item(item_name)
+        token_before = getattr(enemy, "_ankimon_encounter_token", None)
+        if not item or not self._consume_one(item_name):
+            return False
+        try:
+            new_pokemon(
+                enemy,
+                test_window,
+                services.tracker,
+                reviewer_obj,
+                update_hud=True,
+            )
+        except Exception as exc:
+            # new_pokemon sets a fresh token once the enemy's stats and HP
+            # have been replaced. Later scene/HUD errors must not grant a free
+            # reroll or report that a completed escape failed.
+            if getattr(enemy, "_ankimon_encounter_token", None) is token_before:
+                try:
+                    services.db.refund_item(item)
+                except Exception as refund_exc:
+                    self.logger.log(
+                        "error", f"Could not return {item_name} after escape failed: {refund_exc}"
+                    )
+                    message = (
+                        f"Could not escape. Your {item_name} could not be returned "
+                        "to your bag. Please report this problem before using "
+                        "another escape item."
+                    )
+                else:
+                    message = (
+                        f"Could not escape. Your {item_name} was returned to your bag. "
+                        "Please try again."
+                    )
+                self.logger.log("error", f"Could not escape with {item_name}: {exc}")
+                self._refresh_bag()
+                services.ui.warn(message)
+                return False
+            else:
+                self.logger.log(
+                    "warning", f"Escape with {item_name} succeeded with display errors: {exc}"
+                )
+
+        try:
+            self._refresh_bag()
+        except Exception as exc:
+            self.logger.log("warning", f"Could not refresh the bag after escape: {exc}")
+        if self.settings_obj.get("mobile.enabled", True):
+            try:
+                if not services.db.add_mobile_history_entry(history):
+                    self.logger.log("warning", "Could not record the escaped encounter.")
+            except Exception as exc:
+                self.logger.log("warning", f"Could not record the escaped encounter: {exc}")
+        self.logger.log_and_showinfo(
+            "info", f"You used the {item_name} and successfully escaped the battle!"
         )
+        return True
 
     def Handle_Pokeball(self, item_name: str):
         # Check if the item exists in the pokeball chances

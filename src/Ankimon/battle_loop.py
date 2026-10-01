@@ -169,7 +169,12 @@ def init_battle_state(collected_pokemon_ids: set):
 
 
 def _get_cards_per_round() -> int:
-    cards_per_round = settings_obj.get("battle.cards_per_round")
+    # The tracker calls this while build_core is still running. Its registry
+    # settings are ready then, but this module's globals are bound only later.
+    current_settings = services.settings or settings_obj
+    if current_settings is None:
+        return 2
+    cards_per_round = current_settings.get("battle.cards_per_round")
     if isinstance(cards_per_round, int):
         return cards_per_round
     if isinstance(cards_per_round, str) and "-" in cards_per_round:
