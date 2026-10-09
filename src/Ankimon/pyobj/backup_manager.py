@@ -440,35 +440,48 @@ class BackupManager:
             self.logger.log("error", f"Failed to deobfuscate data: {e}")
             return None
 
-    def get_backups(self) -> List[Dict[str, Any]]:
+    def get_backups(self, include_inactive: bool = False) -> List[Dict[str, Any]]:
         """Returns a list of available backups with their summary stats.
 
         Only backups that contain the database for the *currently active* mode
         (normal ``ankimon.db`` vs developer ``ankimonDEV.db``) are shown, and the
         per-DB stats section for the active mode is merged onto the root of the
         summary so the dialog can read them without knowing about dual-DB.
+        ``include_inactive`` includes backups containing only the other mode's
+        database, for interfaces that need to display every saved backup.
         """
         backups = []
         if self.backups_path is None:
             return backups
-        # If the database service isn't initialized yet (e.g. early boot or a
-        # headless environment), there is no active mode to filter on — return an
-        # empty list rather than crashing on ``None.db_path``.
-        if services.db is None:
+        # Preserve the default active-mode filtering when the DB service is not
+        # initialized, while allowing all backups to be listed without it.
+        if services.db is None and not include_inactive:
             return backups
-        active_db = services.db.db_path.name
-        for backup_dir in self._backup_directories(active_db):
+        active_db = services.db.db_path.name if services.db is not None else None
+        required_file = None if include_inactive else active_db
+        for backup_dir in self._backup_directories(required_file):
             if backup_dir.name.startswith("backup_") and backup_dir.is_dir():
                 # Only show a backup if it contains the database for the active mode.
-                if not (backup_dir / active_db).exists():
+                if not include_inactive and not (backup_dir / active_db).exists():
                     continue
                 summary_path = backup_dir / "summary.json"
                 if summary_path.exists():
                     try:
                         with open(summary_path, 'r', encoding='utf-8') as f:
                             summary = json.load(f)
-                            # Shape the summary to match what the UI expects for the active DB.
-                            stats_key = "dev_stats" if active_db == "ankimonDEV.db" else "normal_stats"
+                            # Shape the summary to match the active DB, or the DB
+                            # actually present when listing an inactive backup.
+                            if active_db == "ankimonDEV.db":
+                                stats_key = "dev_stats"
+                            elif active_db == "ankimon.db":
+                                stats_key = "normal_stats"
+                            else:
+                                stats_key = "normal_stats"
+                            if include_inactive:
+                                if (backup_dir / "ankimon.db").exists():
+                                    stats_key = "normal_stats"
+                                elif (backup_dir / "ankimonDEV.db").exists():
+                                    stats_key = "dev_stats"
                             db_stats = summary.get(stats_key, {})
 
                             # Merge DB-specific stats into the root summary object for the UI.
@@ -477,7 +490,7 @@ class BackupManager:
                             backups.append(summary)
                     except (OSError, json.JSONDecodeError):
                         self.logger.log("error", f"Could not read summary for backup: {backup_dir.name}")
-                elif active_db == "ankimon.db":
+                elif include_inactive or active_db == "ankimon.db":
                     # Fallback for older backups without summary.json.
                     summary = {
                         "date": backup_dir.name.replace("backup_", "").replace("_", " "),
@@ -882,13 +895,14 @@ class BackupManager:
                 f"A pending save import could not be reported to the user: {error}",
             )
 
-    def restore_backup(self, backup_path_str: str):
+    def restore_backup(self, backup_path_str: str, interactive: bool = True):
         """Stage the selected backup for the next full process start.
 
         Never copy over a database that the current runtime still has open.
         Restore uses the same crash-safe installation gate as manual Import,
         while retaining credentials because Backup Manager snapshots are private
-        local recovery material rather than portable exports.
+        local recovery material rather than portable exports. Noninteractive
+        callers handle the initial confirmation and restart themselves.
         """
         backup_path = self._resolve_backup_path(backup_path_str)
         if not backup_path.is_dir():
@@ -898,7 +912,7 @@ class BackupManager:
                 showWarning("Selected backup path does not exist.")
                 return
 
-        if not askUser(
+        if interactive and not askUser(
             "Prepare this backup for restore? It will replace the current Ankimon "
             "save on the next full Anki restart. The final current save will be "
             "retained as a separate recovery copy first."
@@ -1015,6 +1029,9 @@ class BackupManager:
         # Past staging, and outside the guard above: the restore is committed,
         # so a failure to announce it must never be reported as one to prepare
         # it. Import keeps its own notice outside its guard for the same reason.
+        if not interactive:
+            return True
+
         try:
             showInfo(
                 "Backup restore prepared for the next full Anki restart.\n\n"
@@ -1116,16 +1133,18 @@ class BackupManager:
             self.backups_path / name for name in plan.values()
         }
 
-    def delete_backup(self, backup_path_str: str):
+    def delete_backup(self, backup_path_str: str, interactive: bool = True):
         if not self._profile_work_lock.acquire(blocking=False):
-            showWarning("Backup migration is running. Please try again shortly.")
-            return
+            error = "Backup migration is running. Please try again shortly."
+            if interactive:
+                showWarning(error)
+            return {"ok": False, "error": error}
         try:
-            return self._delete_backup(backup_path_str)
+            return self._delete_backup(backup_path_str, interactive)
         finally:
             self._profile_work_lock.release()
 
-    def _delete_backup(self, backup_path_str: str):
+    def _delete_backup(self, backup_path_str: str, interactive: bool = True):
         """Deletes a selected backup.
 
         Renamed out of the ``backup_`` namespace first, as retention does. A
@@ -1135,17 +1154,23 @@ class BackupManager:
         """
         backup_path = self._resolve_backup_path(backup_path_str)
         if backup_path in self._migration_protected_paths():
-            showWarning("This backup is needed while legacy migration is incomplete.")
-            return
+            error = "This backup is needed while legacy migration is incomplete."
+            if interactive:
+                showWarning(error)
+            return {"ok": False, "error": error}
         if not backup_path.is_dir():
-            showWarning("Selected backup path does not exist.")
-            return
+            error = "Selected backup path does not exist."
+            if interactive:
+                showWarning(error)
+            return {"ok": False, "error": error}
         try:
             doomed = backup_path.rename(self._discard_name(backup_path))
         except Exception as e:
             self.logger.log("error", f"Failed to delete backup: {e}")
-            showWarning(f"Failed to delete backup: {e}")
-            return
+            error = f"Failed to delete backup: {e}"
+            if interactive:
+                showWarning(error)
+            return {"ok": False, "error": error}
         try:
             self._remove_tree(doomed, None)
             self.logger.log("info", f"Deleted backup: {backup_path.name}")
@@ -1153,7 +1178,9 @@ class BackupManager:
             # Out of the listing and the count already; retention finishes it.
             self.logger.log("error", f"Backup {backup_path.name} is deleted, but some "
                             f"of its files remain until the next backup: {e}")
-        showInfo("Backup deleted successfully.")
+        if interactive:
+            showInfo("Backup deleted successfully.")
+        return {"ok": True}
 
     def _discard_name(self, directory: Path) -> Path:
         return directory.with_name(
