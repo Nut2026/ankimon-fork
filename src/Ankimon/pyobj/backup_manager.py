@@ -464,11 +464,6 @@ class BackupManager:
                 # Only show a backup if it contains the database for the active mode.
                 if not include_inactive and not (backup_dir / active_db).exists():
                     continue
-                # An inactive backup is only restorable if it contains at least
-                # one of the supported databases. A directory with a summary
-                # but no database file (e.g. an interrupted write) must not be
-                # listed — restore_backup rejects it, so showing it here would
-                # offer the user an action that cannot succeed.
                 has_normal_db = (backup_dir / "ankimon.db").exists()
                 has_dev_db = (backup_dir / "ankimonDEV.db").exists()
                 if include_inactive and not (has_normal_db or has_dev_db):
@@ -487,11 +482,6 @@ class BackupManager:
                             else:
                                 stats_key = "normal_stats"
                             if include_inactive:
-                                # Prefer the active mode's database when this
-                                # backup contains it — that is the file
-                                # restore_backup would install. Fall back to
-                                # the other database only when the active one
-                                # is absent from the backup.
                                 if active_db == "ankimonDEV.db" and has_dev_db:
                                     stats_key = "dev_stats"
                                 elif active_db == "ankimon.db" and has_normal_db:
@@ -518,7 +508,7 @@ class BackupManager:
         return backups
 
     def create_backup(self, manual=False, required_file: str = None,
-                      deadline: float = None) -> bool:
+                      deadline: float = None, show_notifications: bool = True) -> bool:
         """Creates a new backup.
 
         ``deadline`` is an absolute ``time.monotonic()`` instant that bounds the
@@ -533,7 +523,7 @@ class BackupManager:
         neither blanks another file's success nor is hidden by it."""
         if self.backups_path is None:
             self.logger.log("error", "Cannot create backup without an active profile path")
-            if manual:
+            if manual and show_notifications:
                 showWarning(
                     "Manual backup failed: no active Anki profile folder is "
                     "available. Open a profile and try again."
@@ -618,7 +608,7 @@ class BackupManager:
             # Report manual feedback based on the ACTUAL outcome — never claim
             # success when the DB copy failed (per-file copy errors are logged,
             # not raised), or the user would trust a backup that isn't there.
-            if manual:
+            if manual and show_notifications:
                 if success:
                     showInfo("Manual backup created successfully.")
                 else:
@@ -629,7 +619,7 @@ class BackupManager:
 
         except Exception as e:
             self.logger.log("error", f"Failed to create backup: {e}")
-            if manual:
+            if manual and show_notifications:
                 showWarning(f"Failed to create backup: {e}")
 
         if success:
