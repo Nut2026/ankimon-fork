@@ -42,6 +42,7 @@
  *
  *  - The Python side can call `window.initializeBackupManager(data)` to
  *    push a fresh list of backups into the UI at any time.
+ *    Restore completion is pushed through `window.onBackupRestored(data)`.
  *
  */
 
@@ -50,6 +51,13 @@
 
 	let backupBridge;
 	let modalAction = null;
+	let restoreResultHandler = null;
+
+	window.onBackupRestored = (result) => {
+		if (restoreResultHandler) {
+			restoreResultHandler(result);
+		}
+	};
 
 	function money(value) {
 		return `$${value ?? 0}`;
@@ -161,13 +169,23 @@
 	}
 
 	function restoreBackup(path) {
+		if (restoreResultHandler) {
+			showToast('A backup restoration is already in progress.', true);
+			return;
+		}
 		if (!backupBridge || !path) {
 			showToast('Backup restoration failed. Please try again.', true);
 			return;
 		}
-		backupBridge.restoreBackup(path, (result) => {
-			if (!result || result.ok !== true) {
-				console.error((result && result.traceback) || (result && result.error) || 'Backup restoration failed.');
+		let completed = false;
+		const handleResult = (result) => {
+			if (!result || result.pending === true || completed) {
+				return;
+			}
+			completed = true;
+			restoreResultHandler = null;
+			if (result.ok !== true) {
+				console.error(result.traceback || result.error || 'Backup restoration failed.');
 				showToast('Backup restoration failed. Please try again.', true);
 				return;
 			}
@@ -179,6 +197,10 @@
 					}
 				});
 			}, 500);
+		};
+		restoreResultHandler = handleResult;
+		backupBridge.restoreBackup(path, (result) => {
+			handleResult(result);
 		});
 	}
 
