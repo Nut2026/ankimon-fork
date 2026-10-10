@@ -1156,14 +1156,14 @@ class BackupBridge(QObject):
             return {"ok": False, "error": "Backup manager is not available."}
 
         def run_backup(_col):
-            return manager.create_backup(manual=False)
+            return manager.create_backup(manual=True, show_notifications=False)
 
         def on_success(ok):
             result = {"ok": bool(ok)}
             if not ok:
                 result["error"] = (
                     getattr(manager, "last_error", None)
-                    or "Backup creation failed."
+                    or "Could not create backup."
                 )
                 tb = getattr(manager, "last_traceback", None)
                 if tb:
@@ -1179,8 +1179,10 @@ class BackupBridge(QObject):
         def on_error(exception):
             result = {
                 "ok": False,
-                "error": str(exception),
-                "traceback": traceback.format_exc(),
+                "error": "Could not create backup.",
+                "traceback": "".join(traceback.format_exception(
+                    type(exception), exception, exception.__traceback__,
+                )),
             }
             try:
                 self._w.webview_backup.page().runJavaScript(
@@ -1196,20 +1198,11 @@ class BackupBridge(QObject):
             # fall back to synchronous behaviour rather than dropping the call.
             return on_success(run_backup(None))
 
-        QueryOp(parent=self._w, op=run_backup, success=on_success) \
-            .without_collection() \
-            .run_in_background()
-        # Preserve the existing failure() hook shape if the harness uses it.
-        try:
-            # QueryOp supports .failure(cb) in modern Anki; attach if present.
-            op = QueryOp(parent=self._w, op=run_backup, success=on_success)
-            if hasattr(op, "failure"):
-                op.failure(on_error).without_collection().run_in_background()
-            else:
-                op.without_collection().run_in_background()
-        except Exception:
-            # If anything about the async path is unsupported, fall back to sync.
-            return on_success(run_backup(None))
+        op = QueryOp(parent=self._w, op=run_backup, success=on_success)
+        if hasattr(op, "failure"):
+            op.failure(on_error).without_collection().run_in_background()
+        else:
+            op.without_collection().run_in_background()
 
         return {"pending": True}
 
@@ -1302,9 +1295,7 @@ class BackupBridge(QObject):
                 )
 
         app.aboutToQuit.connect(relaunch)
-        if not mw.close():
-            app.aboutToQuit.disconnect(relaunch)
-            return {"ok": False, "error": "Anki could not be closed."}
+        mw.close()
         return {"ok": True}
 
     @pyqtSlot(str, result="QVariant")
