@@ -464,6 +464,15 @@ class BackupManager:
                 # Only show a backup if it contains the database for the active mode.
                 if not include_inactive and not (backup_dir / active_db).exists():
                     continue
+                # An inactive backup is only restorable if it contains at least
+                # one of the supported databases. A directory with a summary
+                # but no database file (e.g. an interrupted write) must not be
+                # listed — restore_backup rejects it, so showing it here would
+                # offer the user an action that cannot succeed.
+                has_normal_db = (backup_dir / "ankimon.db").exists()
+                has_dev_db = (backup_dir / "ankimonDEV.db").exists()
+                if include_inactive and not (has_normal_db or has_dev_db):
+                    continue
                 summary_path = backup_dir / "summary.json"
                 if summary_path.exists():
                     try:
@@ -478,9 +487,18 @@ class BackupManager:
                             else:
                                 stats_key = "normal_stats"
                             if include_inactive:
-                                if (backup_dir / "ankimon.db").exists():
+                                # Prefer the active mode's database when this
+                                # backup contains it — that is the file
+                                # restore_backup would install. Fall back to
+                                # the other database only when the active one
+                                # is absent from the backup.
+                                if active_db == "ankimonDEV.db" and has_dev_db:
+                                    stats_key = "dev_stats"
+                                elif active_db == "ankimon.db" and has_normal_db:
                                     stats_key = "normal_stats"
-                                elif (backup_dir / "ankimonDEV.db").exists():
+                                elif has_normal_db:
+                                    stats_key = "normal_stats"
+                                elif has_dev_db:
                                     stats_key = "dev_stats"
                             db_stats = summary.get(stats_key, {})
 
