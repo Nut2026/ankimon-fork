@@ -43,6 +43,7 @@
  *  - The Python side can call `window.initializeBackupManager(data)` to
  *    push a fresh list of backups into the UI at any time.
  *    Restore completion is pushed through `window.onBackupRestored(data)`.
+ *    Create completion is pushed through `window.onBackupCreated(data)`.
  *
  */
 
@@ -52,10 +53,17 @@
 	let backupBridge;
 	let modalAction = null;
 	let restoreResultHandler = null;
+	let createResultHandler = null;
 
 	window.onBackupRestored = (result) => {
 		if (restoreResultHandler) {
 			restoreResultHandler(result);
+		}
+	};
+
+	window.onBackupCreated = (result) => {
+		if (createResultHandler) {
+			createResultHandler(result);
 		}
 	};
 
@@ -76,25 +84,61 @@
 			return;
 		}
 		backups.forEach((backup) => {
-			const [date = '', time = ''] = String(backup.date || ' ').split(' ');
 			const card = document.createElement('article');
 			card.className = 'backup-card';
-			card.innerHTML = `
-				<div class="backup-actions"><button class="restore-btn">Restore Backup</button><button class="delete-btn">Delete Backup</button></div>
-				<div class="backup-date"><strong>${date}</strong><span>Time: ${time.replaceAll('-', ':')}</span></div>
-				<div class="backup-trainer"><strong>${backup.trainer_name || 'N/A'}</strong><span>${backup.main_pokemon_name || 'N/A'} (Lv. ${backup.main_pokemon_level ?? 'N/A'})</span></div>
-				<div class="backup-stat"><span>${backup.pokemon_count || 0} Pokémon</span><span>${backup.item_count || 0} Items</span></div>
-				<div class="backup-cash">${money(backup.trainer_cash)}</div>`;
-			const actions = card.querySelector('.backup-actions');
+
+			const actions = document.createElement('div');
+			actions.className = 'backup-actions';
+			const restoreBtn = document.createElement('button');
+			restoreBtn.className = 'restore-btn';
+			restoreBtn.textContent = 'Restore Backup';
+			const deleteBtn = document.createElement('button');
+			deleteBtn.className = 'delete-btn';
+			deleteBtn.textContent = 'Delete Backup';
+			actions.append(restoreBtn, deleteBtn);
+
+			const dateRow = document.createElement('div');
+			dateRow.className = 'backup-date';
+			const dateStrong = document.createElement('strong');
+			const [date = '', time = ''] = String(backup.date || ' ').split(' ');
+			dateStrong.textContent = date;
+			const timeSpan = document.createElement('span');
+			timeSpan.textContent = `Time: ${time.replaceAll('-', ':')}`;
+			dateRow.append(dateStrong, timeSpan);
+
+			const trainerRow = document.createElement('div');
+			trainerRow.className = 'backup-trainer';
+			const trainerStrong = document.createElement('strong');
+			trainerStrong.textContent = backup.trainer_name || 'N/A';
+			const mainSpan = document.createElement('span');
+			const mainName = backup.main_pokemon_name || 'N/A';
+			const mainLevel = backup.main_pokemon_level ?? 'N/A';
+			mainSpan.textContent = `${mainName} (Lv. ${mainLevel})`;
+			trainerRow.append(trainerStrong, mainSpan);
+
+			const statRow = document.createElement('div');
+			statRow.className = 'backup-stat';
+			const pokemonSpan = document.createElement('span');
+			pokemonSpan.textContent = `${backup.pokemon_count || 0} Pokémon`;
+			const itemSpan = document.createElement('span');
+			itemSpan.textContent = `${backup.item_count || 0} Items`;
+			statRow.append(pokemonSpan, itemSpan);
+
+			const cashRow = document.createElement('div');
+			cashRow.className = 'backup-cash';
+			cashRow.textContent = money(backup.trainer_cash);
+
+			card.append(actions, dateRow, trainerRow, statRow, cashRow);
+
 			actions.addEventListener('click', (event) => event.stopPropagation());
-				actions.querySelector('.restore-btn').addEventListener('click', () => {
+			restoreBtn.addEventListener('click', () => {
 				openModal(
 					'Restore and Restart',
 					'This will replace your current Ankimon save with this backup and restart Anki. Continue?',
 					() => restoreBackup(backup.path),
 				);
 			});
-			actions.querySelector('.delete-btn').addEventListener('click', () => {
+			deleteBtn.addEventListener('click', () => {
 				openModal('Delete Backup', 'Permanently delete this backup folder?', () => deleteBackup(backup.path));
 			});
 			list.appendChild(card);
@@ -143,14 +187,24 @@
 			return;
 		}
 		openModal('Create New Backup', 'Create and save a backup of your current Ankimon data?', () => {
-			backupBridge.createBackup((result) => {
-				if (result && result.ok === false) {
+			let completed = false;
+			const handleResult = (result) => {
+				if (!result || result.pending === true || completed) {
+					return;
+				}
+				completed = true;
+				createResultHandler = null;
+				if (result.ok === false) {
 					console.error(result.traceback || result.error || 'Could not create backup.');
-					showToast('Could not create backup.', true);
+					showToast(result.error || 'Could not create backup.', true);
 					return;
 				}
 				showToast('Manual backup created successfully!');
 				refresh();
+			};
+			createResultHandler = handleResult;
+			backupBridge.createBackup((result) => {
+				handleResult(result);
 			});
 		});
 	}
@@ -184,17 +238,39 @@
 			}
 			completed = true;
 			restoreResultHandler = null;
-			if (result.ok !== true) {
-				console.error(result.traceback || result.error || 'Backup restoration failed.');
-				showToast('Backup restoration failed. Please try again.', true);
+
+			if (result.ok === true && result.pending_restart === true) {
+				showToast(
+					result.message ||
+						'Restore successfully staged! Please restart Anki manually to apply the restoration.',
+					false,
+				);
 				return;
 			}
+
+			if (result.ok !== true) {
+				console.error(result.traceback || result.error || 'Backup restoration failed.');
+				showToast(
+					result.error || 'Backup restoration failed. Please try again.',
+					true,
+				);
+				return;
+			}
+
 			showToast('Backup restoration succeeded! Restarting now...');
 			setTimeout(() => {
 				backupBridge.restartAnki((restartResult) => {
-					if (!restartResult || restartResult.ok !== true) {
-						console.error((restartResult && restartResult.error) || 'Anki could not be restarted.');
+					if (restartResult && restartResult.ok === true) {
+						return;
 					}
+					const detail =
+						(restartResult && restartResult.error) ||
+						'Anki could not be restarted automatically.';
+					console.error(detail);
+					showToast(
+						`${detail} Restore successfully staged! Please restart Anki manually to apply the replacement.`,
+						true,
+					);
 				});
 			}, 500);
 		};
