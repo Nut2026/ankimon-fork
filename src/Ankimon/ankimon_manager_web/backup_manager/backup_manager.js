@@ -260,7 +260,7 @@
 			showToast('Backup restoration succeeded! Restarting now...');
 			setTimeout(() => {
 				backupBridge.restartAnki((restartResult) => {
-					if (restartResult && restartResult.ok === true) {
+					if (!restartResult || restartResult.ok !== false) {
 						return;
 					}
 					const detail =
