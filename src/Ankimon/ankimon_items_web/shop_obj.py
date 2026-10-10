@@ -1086,10 +1086,53 @@ class BackupBridge(QObject):
         super().__init__()
         self._w = window
 
+    def _manager(self):
+        manager = getattr(self._w, "backup_manager", None)
+        if manager is None:
+            raise RuntimeError("Backup manager is not available.")
+        return manager
+
+    def _permitted_backup_paths(self, manager):
+        """Return the set of resolved paths the manager currently lists as
+        restorable backups. Used to confine WebChannel-supplied paths to
+        entries the UI has actually shown the user."""
+        entries = manager.get_backups(include_inactive=True) or []
+        permitted = set()
+        for entry in entries:
+            # Entries may be dicts (with a "path" key) or plain path strings.
+            if isinstance(entry, dict):
+                raw = entry.get("path") or entry.get("backup_path")
+            else:
+                raw = entry
+            if not raw:
+                continue
+            try:
+                resolved = manager._resolve_backup_path(raw)
+            except Exception:
+                # If the manager can't resolve it, it isn't a valid backup.
+                continue
+            if resolved is not None:
+                permitted.add(str(resolved))
+        return permitted
+
+    def _validate_backup_path(self, backup_path):
+        """Raise ValueError unless backup_path resolves to a listed backup."""
+        if not backup_path:
+            raise ValueError("No backup path supplied.")
+        manager = self._manager()
+        permitted = self._permitted_backup_paths(manager)
+        try:
+            resolved = manager._resolve_backup_path(backup_path)
+        except Exception as error:
+            raise ValueError(f"Unresolvable backup path: {error}") from error
+        if resolved is None or str(resolved) not in permitted:
+            raise ValueError("Backup path is not one of the listed backups.")
+        return resolved
+
     @pyqtSlot(result="QVariant")
     def getBackups(self):
         try:
-            manager = self._w.backup_manager
+            manager = self._manager()
             return {
                 "backups": manager.get_backups(include_inactive=True),
                 "path": str(manager.backups_path or ""),
@@ -1102,29 +1145,141 @@ class BackupBridge(QObject):
 
     @pyqtSlot(result="QVariant")
     def createBackup(self):
-        try:
-            manager = self._w.backup_manager
-            ok = bool(manager.create_backup(manual=False))
-            return {
-                "ok": ok,
-                "error": None if ok else manager.last_error,
-                "traceback": None if ok else manager.last_traceback,
+        """Kick off backup creation off the GUI thread.
+
+        Returns immediately with {"pending": True}; the result is pushed to
+        the webview via window.onBackupCreated(...) once the background
+        task finishes.
+        """
+        manager = getattr(self._w, "backup_manager", None)
+        if manager is None:
+            return {"ok": False, "error": "Backup manager is not available."}
+
+        def run_backup(_col):
+            return manager.create_backup(manual=False)
+
+        def on_success(ok):
+            result = {"ok": bool(ok)}
+            if not ok:
+                result["error"] = (
+                    getattr(manager, "last_error", None)
+                    or "Backup creation failed."
+                )
+                tb = getattr(manager, "last_traceback", None)
+                if tb:
+                    result["traceback"] = tb
+            try:
+                self._w.webview_backup.page().runJavaScript(
+                    f"if (window.onBackupCreated) window.onBackupCreated({json.dumps(result)});"
+                )
+            except Exception:
+                pass
+            return result
+
+        def on_error(exception):
+            result = {
+                "ok": False,
+                "error": str(exception),
+                "traceback": traceback.format_exc(),
             }
-        except Exception as error:
-            return {"ok": False, "error": str(error), "traceback": traceback.format_exc()}
+            try:
+                self._w.webview_backup.page().runJavaScript(
+                    f"if (window.onBackupCreated) window.onBackupCreated({json.dumps(result)});"
+                )
+            except Exception:
+                pass
+
+        try:
+            from aqt.operations import QueryOp
+        except ImportError:
+            # aqt.operations unavailable (very old Anki / test harness):
+            # fall back to synchronous behaviour rather than dropping the call.
+            return on_success(run_backup(None))
+
+        QueryOp(parent=self._w, op=run_backup, success=on_success) \
+            .without_collection() \
+            .run_in_background()
+        # Preserve the existing failure() hook shape if the harness uses it.
+        try:
+            # QueryOp supports .failure(cb) in modern Anki; attach if present.
+            op = QueryOp(parent=self._w, op=run_backup, success=on_success)
+            if hasattr(op, "failure"):
+                op.failure(on_error).without_collection().run_in_background()
+            else:
+                op.without_collection().run_in_background()
+        except Exception:
+            # If anything about the async path is unsupported, fall back to sync.
+            return on_success(run_backup(None))
+
+        return {"pending": True}
 
     @pyqtSlot(str, result="QVariant")
     def restoreBackup(self, backup_path):
+        """Kick off restore off the GUI thread.
+
+        Returns {"pending": True} immediately, or {"ok": False, ...} if the
+        path is rejected up front. On success the webview receives
+        window.onBackupRestored({"ok": True, "pending_restart": <bool>}).
+        """
         try:
-            restored = self._w.backup_manager.restore_backup(
-                backup_path, interactive=False,
-            )
-            return {"ok": restored is True}
-        except Exception as error:
-            return {
-                "ok": False, "error": str(error),
+            resolved = self._validate_backup_path(backup_path)
+        except ValueError as error:
+            return {"ok": False, "error": str(error)}
+
+        manager = self._manager()
+
+        def run_restore(_col):
+            return manager.restore_backup(str(resolved), interactive=False)
+
+        def on_success(restored):
+            if restored is True:
+                result = {"ok": True, "pending_restart": False}
+            elif restored is None:
+                result = {
+                    "ok": True,
+                    "pending_restart": True,
+                    "message": (
+                        "Restore staged. Restart Anki to apply the replacement."
+                    ),
+                }
+            else:
+                result = {"ok": False, "error": "Restore failed."}
+            try:
+                self._w.webview_backup.page().runJavaScript(
+                    f"if (window.onBackupRestored) window.onBackupRestored({json.dumps(result)});"
+                )
+            except Exception:
+                pass
+            return result
+
+        def on_error(exception):
+            result = {
+                "ok": False,
+                "error": str(exception),
                 "traceback": traceback.format_exc(),
             }
+            try:
+                self._w.webview_backup.page().runJavaScript(
+                    f"if (window.onBackupRestored) window.onBackupRestored({json.dumps(result)});"
+                )
+            except Exception:
+                pass
+
+        try:
+            from aqt.operations import QueryOp
+        except ImportError:
+            return on_success(run_restore(None))
+
+        try:
+            op = QueryOp(parent=self._w, op=run_restore, success=on_success)
+            if hasattr(op, "failure"):
+                op.failure(on_error).without_collection().run_in_background()
+            else:
+                op.without_collection().run_in_background()
+        except Exception:
+            return on_success(run_restore(None))
+
+        return {"pending": True}
 
     @pyqtSlot(result="QVariant")
     def restartAnki(self):
@@ -1155,8 +1310,12 @@ class BackupBridge(QObject):
     @pyqtSlot(str, result="QVariant")
     def deleteBackup(self, backup_path):
         try:
+            resolved = self._validate_backup_path(backup_path)
+        except ValueError as error:
+            return {"ok": False, "error": str(error)}
+        try:
             return self._w.backup_manager.delete_backup(
-                backup_path, interactive=False,
+                str(resolved), interactive=False,
             )
         except Exception as error:
             return {"ok": False, "error": str(error), "traceback": traceback.format_exc()}
