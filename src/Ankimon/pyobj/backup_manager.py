@@ -903,7 +903,10 @@ class BackupManager:
                 f"A pending save import could not be reported to the user: {error}",
             )
 
-    def restore_backup(self, backup_path_str: str, interactive: bool = True):
+    def restore_backup(
+        self, backup_path_str: str, interactive: bool = True,
+        confirm_unverified: bool = False,
+    ):
         """Stage the selected backup for the next full process start.
 
         Never copy over a database that the current runtime still has open.
@@ -917,8 +920,11 @@ class BackupManager:
             # Publication can complete between resolving and checking the row.
             backup_path = self._resolve_backup_path(backup_path_str)
             if not backup_path.is_dir():
-                showWarning("Selected backup path does not exist.")
-                return
+                message = "Selected backup path does not exist."
+                if interactive:
+                    showWarning(message)
+                    return
+                return {"status": "failed", "error": message}
 
         if interactive and not askUser(
             "Prepare this backup for restore? It will replace the current Ankimon "
@@ -938,32 +944,47 @@ class BackupManager:
 
         try:
             if services.db is None:
-                showWarning("The Ankimon database is not initialized yet; cannot restore a backup.")
-                return
+                message = "The Ankimon database is not initialized yet; cannot restore a backup."
+                if interactive:
+                    showWarning(message)
+                    return
+                return {"status": "failed", "error": message}
 
             target = Path(services.db.db_path)
             # A damaged save cannot give the verified copy the question above
             # promised, so its replacement needs its own answer.
             retain_unverified = should_confirm_unverified_copy(target)
-            if retain_unverified and not askUser(
-                damaged_save_question(target, "the selected backup"), defaultno=True
-            ):
-                return
+            if retain_unverified:
+                question = damaged_save_question(target, "the selected backup")
+                if interactive:
+                    if not askUser(question, defaultno=True):
+                        return
+                elif not confirm_unverified:
+                    return {
+                        "status": "confirmation_required",
+                        "message": question,
+                    }
 
             # Every confirmation can run the event loop while migration moves
             # the selection. Resolve after ALL dialogs and hold its source
             # stable until staging has finished, without waiting on the GUI.
             if not self._profile_work_lock.acquire(blocking=False):
-                showWarning("Backups are being moved. Please try restoring again shortly.")
-                return
+                message = "Backups are being moved. Please try restoring again shortly."
+                if interactive:
+                    showWarning(message)
+                    return
+                return {"status": "failed", "error": message}
             try:
                 backup_file = self._resolve_backup_path(backup_path_str, target.name) / target.name
                 if not backup_file.is_file():
-                    showWarning(
+                    message = (
                         "The selected backup does not contain a backup for the active "
                         f"database ({target.name})."
                     )
-                    return
+                    if interactive:
+                        showWarning(message)
+                        return
+                    return {"status": "failed", "error": message}
                 # Even a read-only SQLite connection can create WAL/SHM files
                 # beside a backup. Keep the journaled migration tree unchanged
                 # by opening only a private copy, including committed WAL data.
@@ -984,43 +1005,40 @@ class BackupManager:
             finally:
                 self._profile_work_lock.release()
         except ImportAlreadyPendingError:
-            # Guarded like the success notice below: showWarning reaches into
-            # Qt, and an exception raised inside an except clause is not caught
-            # by its siblings -- it would leave restore_backup entirely, with
-            # an import armed and nothing said about it.
+            # Interactive callers report this through Qt; worker callers return
+            # data for the bridge to deliver without opening dialogs here.
             installed = pending_import_is_installed(target)
             if installed:
-                # The record outlived the import; that replacement has already
-                # happened and no restart will repeat it.
-                self._warn_about_pending_import(
+                message = (
                     "The previous save import has ALREADY installed and is the "
                     "save you are playing now. Only its leftover record could "
                     "not be cleared.\n\nUse Ankimon → Game → Cancel Pending Save Import "
                     "to clear that record, then restore this backup again. Nothing "
                     "will be installed a second time."
                 )
-                return
-            if installed is None:
-                # The record or the save could not be read in time to tell, so
-                # claim neither.
-                self._warn_about_pending_import(
+            elif installed is None:
+                message = (
                     "A save import is already recorded for this save, and Ankimon "
                     "could not tell whether it has already installed."
                     "\n\nUse Ankimon → Game → Cancel Pending Save Import to "
                     "clear that record, then restore this backup again."
                 )
+            else:
+                message = (
+                    "A save import is already pending and will install at the next "
+                    "full Anki restart.\n\nUse Ankimon → Game → Cancel Pending Save Import "
+                    "first if you want to restore this backup instead."
+                )
+            if interactive:
+                self._warn_about_pending_import(message)
                 return
-            self._warn_about_pending_import(
-                "A save import is already pending and will install at the next "
-                "full Anki restart.\n\nUse Ankimon → Game → Cancel Pending Save Import "
-                "first if you want to restore this backup instead."
-            )
-            return
+            return {"status": "already_pending", "error": message}
         except ImportStagedError as e:
             # The restore is published and will install; calling it a failure
-            # to prepare would hide an armed replacement from the user.
+            # to prepare would hide an armed replacement from the user. Do not
+            # show a Qt warning from the noninteractive worker-thread path.
             self.logger.log("error", f"Backup restore staged but unfinished: {e}")
-            self._warn_about_pending_import(
+            message = (
                 f"The backup restore could not be finished cleanly: {e}.\n\n"
                 "Your current save is still active, but the restore is now "
                 "PENDING and will install at the next full Anki restart. The "
@@ -1028,17 +1046,23 @@ class BackupManager:
                 "recovery copy first. Use "
                 "Ankimon → Game → Cancel Pending Save Import if you do not want it."
             )
-            return
+            if interactive:
+                self._warn_about_pending_import(message)
+                return
+            return {"status": "staged", "warning": message}
         except Exception as e:
             self.logger.log("error", f"Failed to prepare backup restore: {e}")
-            showWarning(f"Failed to prepare backup restore: {e}")
-            return
+            message = f"Failed to prepare backup restore: {e}"
+            if interactive:
+                showWarning(message)
+                return
+            return {"status": "failed", "error": message}
 
         # Past staging, and outside the guard above: the restore is committed,
         # so a failure to announce it must never be reported as one to prepare
         # it. Import keeps its own notice outside its guard for the same reason.
         if not interactive:
-            return True
+            return {"status": "staged"}
 
         try:
             showInfo(
