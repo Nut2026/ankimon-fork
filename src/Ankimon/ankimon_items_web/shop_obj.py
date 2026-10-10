@@ -1221,36 +1221,7 @@ class BackupBridge(QObject):
 
         manager = self._manager()
 
-        def run_restore(_col):
-            return manager.restore_backup(str(resolved), interactive=False)
-
-        def on_success(restored):
-            if restored is True:
-                result = {"ok": True, "pending_restart": False}
-            elif restored is None:
-                result = {
-                    "ok": True,
-                    "pending_restart": True,
-                    "message": (
-                        "Restore staged. Restart Anki to apply the replacement."
-                    ),
-                }
-            else:
-                result = {"ok": False, "error": "Restore failed."}
-            try:
-                self._w.webview_backup.page().runJavaScript(
-                    f"if (window.onBackupRestored) window.onBackupRestored({json.dumps(result)});"
-                )
-            except Exception:
-                pass
-            return result
-
-        def on_error(exception):
-            result = {
-                "ok": False,
-                "error": str(exception),
-                "traceback": traceback.format_exc(),
-            }
+        def deliver_result(result):
             try:
                 self._w.webview_backup.page().runJavaScript(
                     f"if (window.onBackupRestored) window.onBackupRestored({json.dumps(result)});"
@@ -1258,19 +1229,78 @@ class BackupBridge(QObject):
             except Exception:
                 pass
 
-        try:
-            from aqt.operations import QueryOp
-        except ImportError:
-            return on_success(run_restore(None))
+        def launch_restore(confirm_unverified=False):
+            def run_restore(_col):
+                return manager.restore_backup(
+                    str(resolved), interactive=False,
+                    confirm_unverified=confirm_unverified,
+                )
 
-        try:
+            def on_success(restored):
+                if not isinstance(restored, dict):
+                    result = {
+                        "ok": False,
+                        "error": "Backup restore returned an invalid result.",
+                    }
+                elif restored.get("status") == "confirmation_required":
+                    try:
+                        from aqt.utils import askUser
+
+                        confirmed = askUser(restored["message"], defaultno=True)
+                    except Exception as error:
+                        deliver_result({
+                            "ok": False,
+                            "error": f"Could not confirm backup restore: {error}",
+                        })
+                        return
+                    if not confirmed:
+                        deliver_result({
+                            "ok": False,
+                            "cancelled": True,
+                            "error": "Backup restoration cancelled.",
+                        })
+                        return
+                    launch_restore(confirm_unverified=True)
+                    return
+                elif restored.get("status") == "staged":
+                    result = {
+                        "ok": True,
+                        "pending_restart": False,
+                    }
+                    if restored.get("warning"):
+                        result["warning"] = restored["warning"]
+                else:
+                    result = {
+                        "ok": False,
+                        "error": restored.get("error", "Backup restore failed."),
+                    }
+                deliver_result(result)
+
+            def on_error(exception):
+                deliver_result({
+                    "ok": False,
+                    "error": str(exception),
+                    "traceback": "".join(traceback.format_exception(
+                        type(exception), exception, exception.__traceback__,
+                    )),
+                })
+
+            if QueryOp is None:
+                on_success(run_restore(None))
+                return
+
             op = QueryOp(parent=self._w, op=run_restore, success=on_success)
             if hasattr(op, "failure"):
                 op.failure(on_error).without_collection().run_in_background()
             else:
                 op.without_collection().run_in_background()
-        except Exception:
-            return on_success(run_restore(None))
+
+        try:
+            from aqt.operations import QueryOp
+        except ImportError:
+            QueryOp = None
+
+        launch_restore()
 
         return {"pending": True}
 
