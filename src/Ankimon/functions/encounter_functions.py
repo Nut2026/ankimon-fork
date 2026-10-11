@@ -934,7 +934,7 @@ def generate_random_pokemon(
     if not remove_cap:
         min_level = min(100, min_level)
         max_level = min(100, max_level)
-        if main_pokemon_level == 100:
+        if main_pokemon_level >= 100:
             min_level = max_level = 100
     wild_pokemon_lvl = random.randint(min_level, max_level)
 
