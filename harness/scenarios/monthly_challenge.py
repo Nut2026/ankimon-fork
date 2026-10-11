@@ -17,7 +17,14 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-SCENARIOS = ("overlap", "profile", "warning_switch", "refresh", "reclaim", "atomic_failure", "stale_decision", "sprites")
+SCENARIOS = (
+    "overlap", "profile", "warning_switch", "refresh", "reclaim",
+    "atomic_failure", "stale_decision", "sprites",
+    "pending_learn_reject", "pending_learn_close",
+    "pending_tm_reject", "pending_tm_close", "pending_tm_replacement_reject",
+    "missing_move_row",
+    "tm_progress_accept", "tm_progress_cancel", "tm_moves_changed",
+)
 
 
 def wide_gif():
@@ -320,6 +327,183 @@ def run(scenario):
             finish()
             assert db.get_pokemon(iid)["level"] == 70
             assert db.get_user_data("monthly_challenge") == 1
+
+        elif scenario.startswith(("pending_", "tm_")) or scenario == "missing_move_row":
+            from harness.fixtures import build_pokemon, seed_db
+            from Ankimon.functions.update_main_pokemon import update_main_pokemon
+            from Ankimon.pyobj.move_picker import MovePickerDialog
+            from Ankimon.utils import is_alive
+
+            pc = d.services.pokemon_pc
+            captured = {}
+
+            def open_editor(four_moves=False):
+                moves = ["thundershock", "quickattack"]
+                if four_moves:
+                    moves += ["tailwhip", "growl"]
+                seed_db({
+                    "main": {"species": "Bulbasaur", "level": 10,
+                             "individual_id": "monthly-picker-backup"},
+                    "box": [{"species": "Pikachu", "level": 50,
+                             "individual_id": iid, "moves": moves}],
+                }, db)
+                update_main_pokemon(d.services.main_pokemon)
+                db.set_monthly_challenge_state(iid, 1)
+                pc.show()
+                pc.refresh_gui()
+                pc.show_pokemon_details({"individual_id": iid})
+                QApplication.processEvents()
+                manager = pc.move_manager
+                assert manager.isVisible()
+                assert manager.slots[0]["learn_btn"].isVisible()
+                return manager, moves
+
+            def choose_move(picker):
+                for row in range(picker.table.rowCount()):
+                    picker.table.setCurrentCell(row, 0)
+                    if picker.learn_btn.isEnabled():
+                        break
+                assert picker.learn_btn.isEnabled(), "Fixture needs an unknown move"
+                captured["move"] = picker.get_selected_move()
+                picker.learn_btn.click()
+
+            # PyQt routes signal exceptions through sys.excepthook, separately
+            # from exceptions in our timers. Both must fail the scenario.
+            with patch.object(sys, "excepthook", side_effect=lambda kind, error, tb: timer_errors.append(error)):
+                if scenario == "missing_move_row":
+                    for edit in ("learn", "forget", "cached_save"):
+                        manager, _ = open_editor()
+                        if edit == "learn":
+                            def remove_and_learn():
+                                picker = QApplication.activeModalWidget()
+                                assert isinstance(picker, MovePickerDialog)
+                                assert db.reject_monthly_challenge(iid)
+                                # No PC refresh: the save itself must revalidate
+                                # the row even when the editor remains cached.
+                                choose_move(picker)
+                            later(remove_and_learn)
+                            manager.slots[0]["learn_btn"].click()
+                        elif edit == "forget":
+                            manager.slots[0]["forget_btn"].click()
+                            QApplication.processEvents()
+                            yes = next(button for button in manager.findChildren(QPushButton)
+                                       if button.text() == "Yes" and button.isVisible())
+                            assert db.reject_monthly_challenge(iid)
+                            yes.click()
+                        else:
+                            save = manager.save_fn
+                            stale_data = copy.deepcopy(manager.full_data)
+                            assert db.reject_monthly_challenge(iid)
+                            save(stale_data)
+                        assert not timer_errors, timer_errors
+                        assert db.get_pokemon(iid) is None, f"Stale {edit} recreated the deleted row"
+                        assert db.get_user_data("monthly_challenge") == 2
+                elif scenario.startswith("tm_"):
+                    from Ankimon.pyobj.attack_dialog import AttackDialog
+
+                    manager, before = open_editor(four_moves=True)
+                    assert db.add_item("protect", 1, {"type": "TM"})
+                    changed_moves = ["thunderbolt", *before[1:]]
+
+                    def update_during_replacement():
+                        dialog = QApplication.activeModalWidget()
+                        assert isinstance(dialog, AttackDialog) and dialog.isVisible()
+                        fresh = db.get_pokemon(iid)
+                        fresh.update(level=51, xp=123, nickname="Fresh progress")
+                        if scenario == "tm_moves_changed":
+                            fresh["attacks"] = changed_moves
+                        assert db.save_pokemon(fresh)
+                        if scenario == "tm_progress_cancel":
+                            press_text("Reject Attack")
+                        else:
+                            button = next(button for button in dialog.findChildren(QPushButton)
+                                          if button.property("raw_move") == before[0])
+                            button.click()
+
+                    def choose_tm():
+                        picker = QApplication.activeModalWidget()
+                        assert isinstance(picker, MovePickerDialog)
+                        later(update_during_replacement)
+                        choose_move(picker)
+
+                    later(choose_tm)
+                    manager.tm_btn.click()
+                    assert not timer_errors, timer_errors
+                    assert captured["move"] == "protect"
+                    saved = db.get_pokemon(iid)
+                    assert saved["level"] == 51, "TM replacement overwrote newer progress"
+                    assert saved["xp"] == 123 and saved["nickname"] == "Fresh progress"
+                    if scenario == "tm_progress_accept":
+                        expected = ["protect", *before[1:]]
+                    elif scenario == "tm_moves_changed":
+                        expected = changed_moves
+                    else:
+                        expected = before
+                    assert saved["attacks"] == expected
+                else:
+                    is_tm = scenario.startswith("pending_tm_")
+                    replacement = scenario == "pending_tm_replacement_reject"
+                    rejecting = scenario.endswith("reject")
+                    manager, before = open_editor(four_moves=replacement)
+                    payload["pokemon"] = build_pokemon({
+                        "species": "Pikachu", "level": 1, "individual_id": iid,
+                    }).to_dict()
+                    if is_tm:
+                        assert db.add_item("protect", 1, {"type": "TM"})
+
+                    def reject_monthly():
+                        later(lambda: press_text("Yes"))
+                        press("rejectBtn")
+
+                    def complete_fetch():
+                        modal = QApplication.activeModalWidget()
+                        if replacement:
+                            from Ankimon.gui_classes.pokemon_details import AttackDialog
+                            assert isinstance(modal, AttackDialog)
+                        else:
+                            assert isinstance(modal, MovePickerDialog)
+                        captured["modal"] = modal
+                        assert modal.isVisible(), "Fetch must complete during the move dialog"
+                        later(reject_monthly if rejecting else lambda: press_text("Close"))
+                        finish()
+                        if rejecting:
+                            assert db.get_pokemon(iid) is None
+                            assert db.get_user_data("monthly_challenge") == 2
+                            assert pc._selected_individual_id is None
+                            assert not is_alive(manager) or not manager.isVisible()
+                            assert not is_alive(modal) or not modal.isVisible(), "Rejection left a move dialog open"
+                            if is_alive(modal):
+                                assert modal.result() == QDialog.DialogCode.Rejected
+                        else:
+                            assert db.get_pokemon(iid)["attacks"] == before
+                            assert db.get_user_data("monthly_challenge") == 1
+                            assert QApplication.activeModalWidget() is modal
+                            assert modal.isVisible() and manager.isVisible()
+                            choose_move(modal)
+
+                    def enter_replacement():
+                        picker = QApplication.activeModalWidget()
+                        assert isinstance(picker, MovePickerDialog)
+                        # The next timer runs in the real four-move replacement
+                        # dialog, after accepting the first TM picker.
+                        later(complete_fetch)
+                        choose_move(picker)
+
+                    monthly_action().trigger()
+                    assert len(queued) == 1
+                    later(enter_replacement if replacement else complete_fetch)
+                    if is_tm:
+                        manager.tm_btn.click()
+                    else:
+                        manager.slots[0]["learn_btn"].click()
+                    assert not timer_errors, timer_errors
+                    if rejecting:
+                        assert db.get_pokemon(iid) is None, "A move dialog resurrected the rejected reward"
+                        assert db.get_user_data("monthly_challenge") == 2
+                    else:
+                        expected = before + [captured["move"]] if is_tm else [captured["move"], *before[1:]]
+                        assert db.get_pokemon(iid)["attacks"] == expected
+                        assert db.get_user_data("monthly_challenge") == 1
 
         elif scenario == "sprites":
             import Ankimon.functions.sprite_functions as sprites
