@@ -1471,8 +1471,13 @@ def remember_attack(
     new_attack: str,
     logger: ShowInfoLogger,
     refresh_callback=None,
+    *,
+    parent_window=None,
+    can_save=None,
 ):
-    """Learn a new attack using database."""
+    """Learn a move; an editor may supply its parent and session/save guard."""
+    if can_save is not None and not can_save():
+        return
     db = services.db
 
     if new_attack in attacks:
@@ -1484,7 +1489,8 @@ def remember_attack(
         logger.log_and_showinfo("warning", "Pokemon not found!")
         return
 
-    attacks = pokemon_data["attacks"]
+    offered_attacks = list(pokemon_data["attacks"])
+    attacks = list(offered_attacks)
     if new_attack:
         msg = f"Your {pokemon_data['name'].capitalize()} can learn a new attack !"
         if len(attacks) < 4:
@@ -1492,7 +1498,8 @@ def remember_attack(
             msg += f"\n Your {pokemon_data['name'].capitalize()} has learned {new_attack} !"
             logger.log_and_showinfo("info", f"{msg}")
         else:
-            dialog = AttackDialog(attacks, new_attack, parent=mw)
+            parent = parent_window if parent_window is not None else mw
+            dialog = AttackDialog(attacks, new_attack, parent=parent)
             QTimer.singleShot(
                 0,
                 lambda: (
@@ -1504,6 +1511,8 @@ def remember_attack(
                 result = dialog.exec()
             finally:
                 dialog.deleteLater()
+            if can_save is not None and not can_save():
+                return
             if result == QDialog.DialogCode.Accepted:
                 selected_attack = dialog.selected_attack
                 try:
@@ -1517,6 +1526,16 @@ def remember_attack(
             else:
                 logger.log_and_showinfo("info", f"{new_attack} will be discarded.")
 
+    # The PC can be retired while a picker or an informational dialog runs.
+    # Recheck immediately before persistence, even after a rejected picker.
+    if can_save is not None and not can_save():
+        return
+    if can_save is not None:
+        current = db.get_pokemon(individual_id)
+        if current is None or current.get("attacks", []) != offered_attacks:
+            return
+        # Preserve progress committed while the PC's nested dialog was open.
+        pokemon_data = current
     pokemon_data["attacks"] = attacks
     db.save_pokemon(pokemon_data)
 
