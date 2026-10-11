@@ -908,7 +908,7 @@ def test_generate_random_pokemon_level_cap(
 
     rolled_level = max(1, main_level + (3 if upper_bound else -3))
     expected = rolled_level if remove_cap else min(100, rolled_level)
-    if main_level == 100 and not remove_cap:
+    if main_level >= 100 and not remove_cap:
         expected = 100  # Preserve the established max-level encounter behavior.
     assert result[1] == 1
     assert result[2] == expected
