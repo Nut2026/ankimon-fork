@@ -931,12 +931,12 @@ def generate_random_pokemon(
     remove_cap = settings_obj.get("misc.remove_level_cap", False)
     min_level = max(1, main_pokemon_level - lvl_variation)
     max_level = max(1, main_pokemon_level + lvl_variation)
-    if not remove_cap:
-        min_level = min(100, min_level)
-        max_level = min(100, max_level)
-        if main_pokemon_level >= 100:
-            min_level = max_level = 100
     wild_pokemon_lvl = random.randint(min_level, max_level)
+    if not remove_cap:
+        if main_pokemon_level >= 100:
+            wild_pokemon_lvl = 100
+        else:
+            wild_pokemon_lvl = min(100, wild_pokemon_lvl)
 
     collected_ids = kwargs.get("collected_ids", None)
     if collected_ids is None and args:
