@@ -349,11 +349,14 @@ _items_web_window = None
 
 
 def get_items_window(backup_manager=None):
-  global _items_web_window
-  if is_alive(_items_web_window):
-    if backup_manager is not None:
-      _items_web_window.backup_manager = backup_manager
-    return _items_web_window
+    global _items_web_window
+    if is_alive(_items_web_window):
+        if backup_manager is not None:
+            _items_web_window.backup_manager = backup_manager
+        return _items_web_window
+
+    from .ankimon_items_web.shop_obj import AnkimonItemsWeb
+
     _items_web_window = AnkimonItemsWeb(
         addon_dir,
         shop_manager=shop_manager,
