@@ -353,7 +353,7 @@ def get_items_window(backup_manager=None):
   if is_alive(_items_web_window):
     if backup_manager is not None:
       _items_web_window.backup_manager = backup_manager
-    return _items_web window
+    return _items_web_window
     _items_web_window = AnkimonItemsWeb(
         addon_dir,
         shop_manager=shop_manager,
