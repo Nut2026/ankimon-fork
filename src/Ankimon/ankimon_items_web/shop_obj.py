@@ -1594,6 +1594,8 @@ class AnkimonItemsWeb(QDialog):
                 title = "Ankimon — Backup Manager"
                 target_view = self.webview_backup
                 path = self.addon_dir / "ankimon_manager_web" / "backup_manager" / "backup_manager.html"
+                if SCREEN_BACKUP in self.ready_screens:
+                    self.backup_bridge.refresh_screen()
             else:
                 return
 
