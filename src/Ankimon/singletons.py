@@ -349,18 +349,11 @@ _items_web_window = None
 
 
 def get_items_window(backup_manager=None):
-    global _items_web_window
-    if backup_manager is None:
-        # Non-menu callers (including item evolution) need the same manager.
-        from . import backup_manager as active_backup_manager
-
-        backup_manager = active_backup_manager
-    if is_alive(_items_web_window):
-        if backup_manager is not None:
-            _items_web_window.backup_manager = backup_manager
-        return _items_web_window
-    from .ankimon_items_web.shop_obj import AnkimonItemsWeb
-
+  global _items_web_window
+  if is_alive(_items_web_window):
+    if backup_manager is not None:
+      _items_web_window.backup_manager = backup_manager
+    return _items_web window
     _items_web_window = AnkimonItemsWeb(
         addon_dir,
         shop_manager=shop_manager,
