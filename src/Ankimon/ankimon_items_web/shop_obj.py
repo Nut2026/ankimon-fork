@@ -15,6 +15,7 @@ import traceback
 import threading
 import base64
 from datetime import datetime
+from pathlib import Path
 import requests
 from aqt import QDialog, QVBoxLayout, QWebEngineView, QWebEnginePage, mw
 from aqt.qt import Qt, QUrl, QFrame, QWebEngineProfile
@@ -36,7 +37,7 @@ except ImportError:
                 if self.success:
                     self.success(result)
             return self
-from PyQt6.QtCore import QObject, pyqtSlot, QTimer, QByteArray, QVariant, QCoreApplication, QProcess
+from PyQt6.QtCore import QObject, pyqtSlot, QTimer, QByteArray, QVariant, QCoreApplication, QProcess, QEvent
 from PyQt6.QtGui import QColor, QDesktopServices, QIcon
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWidgets import QStackedWidget
