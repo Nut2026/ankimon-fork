@@ -1,291 +1,336 @@
-/*
-  Backup Manager - Styles
+/**
+ * Ankimon Backup Manager
+ *
+ * This file powers the "Backup Manager" window in Ankimon. It's the piece
+ * of JavaScript that lets players save, restore, and manage backups of
+ * their Ankimon save data without ever touching the file system themselves.
+ *
+ * What it does:
+ *
+ *  - Shows a list of all your existing backups, each one displayed as a
+ *    card with the date and time it was made, your trainer name, your
+ *    main Pokémon (and its level), how many Pokémon and items you had,
+ *    and how much cash you were carrying.
+ *
+ *  - Lets you create a brand-new backup of your current save with a single
+ *    click, after a quick confirmation popup.
+ *
+ *  - Lets you restore an old backup. This replaces your current save with
+ *    the chosen one and then restarts Anki so the change takes effect.
+ *    It always asks for confirmation first, since it's destructive.
+ *
+ *  - Lets you delete a backup you no longer want, again with a
+ *    confirmation popup to prevent accidents.
+ *
+ *  - Lets you open the folder where backups are stored on your computer,
+ *    in case you want to copy them somewhere safe or inspect them
+ *    manually.
+ *
+ *  - Shows friendly toast notifications when something succeeds or fails,
+ *    and displays detailed error info (including tracebacks) directly in
+ *    the list if the Python side reports a problem.
+ *
+ * How it talks to the rest of Ankimon:
+ *
+ *  - It communicates with the Python backend through a QWebChannel bridge
+ *    called `backup`. That bridge exposes methods like `getBackups`,
+ *    `createBackup`, `restoreBackup`, `deleteBackup`, `openBackupFolder`,
+ *    and `restartAnki`.
+ *
+ *  - There's also a `nav` bridge used to wire up the navigation switcher
+ *    and to close the window when the close button is clicked.
+ *
+ *  - The Python side can call `window.initializeBackupManager(data)` to
+ *    push a fresh list of backups into the UI at any time.
+ *    Restore completion is pushed through `window.onBackupRestored(data)`.
+ *    Create completion is pushed through `window.onBackupCreated(data)`.
+ *
+ */
 
-  This stylesheet dresses up the Backup Manager window. It assumes the
-  shared shop.css is already loaded, since it relies on that file's theme
-  variables (--text-bright, --text-muted, --text-main, --bg-card,
-  --border-main, --accent-blue, --accent-red) for colours and typography.
+(function () {
+	'use strict';
 
-  What's in here:
+	let backupBridge;
+	let modalAction = null;
+	let restoreResultHandler = null;
+	let createResultHandler = null;
 
-  - Two local accent colours at the top: a warm gold for the cash amount
-    shown on each backup card, and red for the destructive "Delete" button.
+	window.onBackupRestored = (result) => {
+		if (restoreResultHandler) {
+			restoreResultHandler(result);
+		}
+	};
 
-  - Layout for the main content area and its heading ("Available Backups").
+	window.onBackupCreated = (result) => {
+		if (createResultHandler) {
+			createResultHandler(result);
+		}
+	};
 
-  - Styling for the backup list and each backup card. Cards are laid out
-    as a five-column grid: action buttons, date, trainer + main Pokémon,
-    stats, and cash. They gently lift and highlight on hover.
+	function money(value) {
+		return `$${value ?? 0}`;
+	}
 
-  - Smaller typographic rules for the labels inside each card, plus a
-    monospaced gold style for the cash value.
+	function render(data) {
+		if (data && data.error) {
+			renderError(data.error);
+			return;
+		}
+		const backups = (data && data.backups) || [];
+		const list = document.getElementById('backup-list');
+		list.replaceChildren();
+		if (!backups.length) {
+			list.innerHTML = '<div class="backup-empty">No backups found.</div>';
+			return;
+		}
+		backups.forEach((backup) => {
+			const card = document.createElement('article');
+			card.className = 'backup-card';
 
-  - Styling for the Restore and Delete buttons, the "no backups yet"
-    empty state, and the error state (which shows a title plus a
-    scrollable, selectable traceback so users can copy it).
+			const actions = document.createElement('div');
+			actions.className = 'backup-actions';
+			const restoreBtn = document.createElement('button');
+			restoreBtn.className = 'restore-btn';
+			restoreBtn.textContent = 'Restore Backup';
+			const deleteBtn = document.createElement('button');
+			deleteBtn.className = 'delete-btn';
+			deleteBtn.textContent = 'Delete Backup';
+			actions.append(restoreBtn, deleteBtn);
 
-  - The confirmation modal: a dimmed full-screen overlay with a centred
-    card, heading, message, and Cancel / Confirm buttons.
+			const dateRow = document.createElement('div');
+			dateRow.className = 'backup-date';
+			const dateStrong = document.createElement('strong');
+			const [date = '', time = ''] = String(backup.date || ' ').split(' ');
+			dateStrong.textContent = date;
+			const timeSpan = document.createElement('span');
+			timeSpan.textContent = `Time: ${time.replaceAll('-', ':')}`;
+			dateRow.append(dateStrong, timeSpan);
 
-  - A toast element (shared class .shop-toast, mostly styled elsewhere)
-    that the JavaScript uses for short success/failure messages.
+			const trainerRow = document.createElement('div');
+			trainerRow.className = 'backup-trainer';
+			const trainerStrong = document.createElement('strong');
+			trainerStrong.textContent = backup.trainer_name || 'N/A';
+			const mainSpan = document.createElement('span');
+			const mainName = backup.main_pokemon_name || 'N/A';
+			const mainLevel = backup.main_pokemon_level ?? 'N/A';
+			mainSpan.textContent = `${mainName} (Lv. ${mainLevel})`;
+			trainerRow.append(trainerStrong, mainSpan);
 
-  - A responsive tweak for narrow windows: the heading stacks, cards
-    collapse to two columns, and the action buttons stretch full width
-    so they're easy to tap.
-*/
+			const statRow = document.createElement('div');
+			statRow.className = 'backup-stat';
+			const pokemonSpan = document.createElement('span');
+			pokemonSpan.textContent = `${backup.pokemon_count || 0} Pokémon`;
+			const itemSpan = document.createElement('span');
+			itemSpan.textContent = `${backup.item_count || 0} Items`;
+			statRow.append(pokemonSpan, itemSpan);
 
-:root {
-    --backup-accent: #f2cc60;
-    --backup-danger: #f85149;
-}
+			const cashRow = document.createElement('div');
+			cashRow.className = 'backup-cash';
+			cashRow.textContent = money(backup.trainer_cash);
 
-.backup-content {
-    padding: 30px 34px 64px;
-    max-width: 1100px;
-    margin: 0 auto;
-}
+			card.append(actions, dateRow, trainerRow, statRow, cashRow);
 
-.backup-heading {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-end;
-    gap: 20px;
-    margin-bottom: 24px;
-}
+			actions.addEventListener('click', (event) => event.stopPropagation());
+			restoreBtn.addEventListener('click', () => {
+				openModal(
+					'Restore and Restart',
+					'This will replace your current Ankimon save with this backup and restart Anki. Continue?',
+					() => restoreBackup(backup.path),
+				);
+			});
+			deleteBtn.addEventListener('click', () => {
+				openModal('Delete Backup', 'Permanently delete this backup folder?', () => deleteBackup(backup.path));
+			});
+			list.appendChild(card);
+		});
+	}
 
-.backup-heading h2 {
-    margin: 0 0 6px;
-    color: var(--text-bright);
-}
+	function refresh() {
+		if (backupBridge) {
+			backupBridge.getBackups(render);
+		} else {
+			renderError('Backup Manager is still connecting to Ankimon.');
+		}
+	}
 
-.backup-list {
-    display: grid;
-    gap: 12px;
-}
+	function renderError(message) {
+		renderFailure(message, null);
+	}
 
-.backup-card {
-    display: grid;
-    grid-template-columns: auto 150px minmax(0, 1fr) auto auto;
-    gap: 20px;
-    align-items: center;
-    background: var(--bg-card);
-    border: 1px solid var(--border-main);
-    border-radius: 12px;
-    padding: 18px 20px;
-    transition: border-color .15s ease, transform .15s ease;
-}
+	function showToast(message, isError = false) {
+		const toast = document.getElementById('toast');
+		toast.textContent = message;
+		toast.classList.toggle('error', isError);
+		toast.classList.add('visible');
+		clearTimeout(toast._timer);
+		toast._timer = setTimeout(() => toast.classList.remove('visible'), 3000);
+	}
 
-.backup-card:hover {
-    border-color: var(--accent-blue);
-    transform: translateY(-1px);
-}
+	function renderFailure(message, trace) {
+		const empty = document.createElement('div');
+		empty.className = 'backup-empty backup-error';
+		const title = document.createElement('strong');
+		title.textContent = message || 'Backup Manager operation failed.';
+		empty.appendChild(title);
+		if (trace) {
+			const details = document.createElement('pre');
+			details.textContent = trace;
+			empty.appendChild(details);
+		}
+		const list = document.getElementById('backup-list');
+		list.replaceChildren(empty);
+	}
 
-.backup-date strong,
-.backup-trainer strong {
-    display: block;
-    color: var(--text-bright);
-    font-size: 1rem;
-}
+	function createBackup() {
+		if (!backupBridge) {
+			renderError('Backup Manager is still connecting to Ankimon.');
+			return;
+		}
+		openModal('Create New Backup', 'Create and save a backup of your current Ankimon data?', () => {
+			let completed = false;
+			const handleResult = (result) => {
+				if (!result || result.pending === true || completed) {
+					return;
+				}
+				completed = true;
+				createResultHandler = null;
+				if (result.ok === false) {
+					console.error(result.traceback || result.error || 'Could not create backup.');
+					showToast(result.error || 'Could not create backup.', true);
+					return;
+				}
+				showToast('Manual backup created successfully!');
+				refresh();
+			};
+			createResultHandler = handleResult;
+			backupBridge.createBackup((result) => {
+				handleResult(result);
+			});
+		});
+	}
 
-.backup-date span,
-.backup-trainer span,
-.backup-stat span {
-    color: var(--text-muted);
-    font-size: .78rem;
-}
+	function deleteBackup(path) {
+		if (!backupBridge || !path) return;
+		backupBridge.deleteBackup(path, (result) => {
+			if (result && result.ok === false) {
+				console.error(result.traceback || result.error || 'Could not delete backup.');
+				showToast(result.error || 'Could not delete backup.', true);
+				return;
+			}
+			showToast('Backup successfully deleted!');
+			refresh();
+		});
+	}
 
-.backup-trainer strong {
-    font-size: 1.05rem;
-}
+	function restoreBackup(path) {
+		if (restoreResultHandler) {
+			showToast('A backup restoration is already in progress.', true);
+			return;
+		}
+		if (!backupBridge || !path) {
+			showToast('Backup restoration failed. Please try again.', true);
+			return;
+		}
+		let completed = false;
+		const handleResult = (result) => {
+			if (!result || result.pending === true || completed) {
+				return;
+			}
+			completed = true;
+			restoreResultHandler = null;
 
-.backup-stat {
-    display: grid;
-    gap: 4px;
-    text-align: right;
-    white-space: nowrap;
-}
+			if (result.ok === true && result.pending_restart === true) {
+				showToast(
+					result.message ||
+						'Restore successfully staged! Please restart Anki manually to apply the restoration.',
+					false,
+				);
+				return;
+			}
 
-.backup-cash {
-    color: var(--backup-accent);
-    font: 700 1rem 'JetBrains Mono', monospace;
-    white-space: nowrap;
-}
+			if (result.ok !== true) {
+				console.error(result.traceback || result.error || 'Backup restoration failed.');
+				showToast(
+					result.error || 'Backup restoration failed. Please try again.',
+					true,
+				);
+				return;
+			}
 
-.backup-actions {
-    display: flex;
-    gap: 8px;
-    justify-content: flex-start;
-}
+			showToast('Backup restoration succeeded! Restarting now...');
+			setTimeout(() => {
+				backupBridge.restartAnki((restartResult) => {
+					if (!restartResult || restartResult.ok !== false) {
+						return;
+					}
+					const detail =
+						(restartResult && restartResult.error) ||
+						'Anki could not be restarted automatically.';
+					console.error(detail);
+					showToast(
+						`${detail} Restore successfully staged! Please restart Anki manually to apply the replacement.`,
+						true,
+					);
+				});
+			}, 500);
+		};
+		restoreResultHandler = handleResult;
+		backupBridge.restoreBackup(path, (result) => {
+			handleResult(result);
+		});
+	}
 
-.backup-actions button {
-    border: 1px solid var(--accent-blue);
-    border-radius: 6px;
-    padding: 5px 9px;
-    color: var(--text-bright);
-    background: var(--accent-blue);
-    cursor: pointer;
-    font: 600 .72rem 'Outfit', sans-serif;
-    line-height: 1.2;
-    white-space: nowrap;
-}
+	function openModal(title, message, action) {
+		document.getElementById('backup-modal-title').textContent = title;
+		document.getElementById('backup-modal-message').textContent = message;
+		document.getElementById('backup-modal-confirm').textContent = title;
+		modalAction = action;
+		document.getElementById('backup-modal').classList.remove('hidden');
+		document.getElementById('backup-modal-confirm').focus();
+	}
 
-.backup-actions button:hover {
-    border-color: var(--accent-blue);
-    color: var(--text-bright);
-}
+	function closeModal() {
+		modalAction = null;
+		document.getElementById('backup-modal').classList.add('hidden');
+	}
 
-.backup-actions .restore-btn {
-    background: var(--accent-blue);
-    border-color: var(--accent-blue);
-    color: var(--text-bright);
-}
-
-.backup-actions .delete-btn {
-    background: var(--backup-danger);
-    border-color: var(--backup-danger);
-    color: white;
-}
-
-#manual-backup-btn,
-#open-folder-btn {
-    background: linear-gradient(135deg,
-        rgba(88, 166, 255, 0.18),
-        rgba(88, 166, 255, 0.07));
-    border: 1px solid rgba(88, 166, 255, 0.35);
-}
-
-#manual-backup-btn:hover,
-#open-folder-btn:hover {
-    background: linear-gradient(135deg,
-        rgba(88, 166, 255, 0.3),
-        rgba(88, 166, 255, 0.14));
-    border-color: var(--accent-blue);
-}
-
-.backup-actions .restore-btn:hover {
-    background: #79b8ff;
-    border-color: #79b8ff;
-}
-
-.backup-actions .delete-btn:hover {
-    background: #ff6a63;
-    border-color: #ff6a63;
-}
-
-.backup-empty {
-    padding: 56px 20px;
-    text-align: center;
-    color: var(--text-muted);
-    background: var(--bg-card);
-    border: 1px dashed var(--border-main);
-    border-radius: 12px;
-}
-
-.backup-error {
-    text-align: left;
-    border-color: var(--accent-red);
-    color: #ffb4ae;
-}
-
-.backup-error strong {
-    display: block;
-    color: var(--text-bright);
-    margin-bottom: 12px;
-}
-
-.backup-error pre {
-    max-height: 320px;
-    overflow: auto;
-    white-space: pre-wrap;
-    user-select: text;
-    -webkit-user-select: text;
-    font: .72rem 'JetBrains Mono', monospace;
-}
-
-.nav-action {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-
-.backup-modal {
-    position: fixed;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    z-index: 20;
-    background: rgba(0, 0, 0, .68);
-}
-
-.backup-modal.hidden {
-    display: none;
-}
-
-.backup-modal-card {
-    width: min(420px, calc(100vw - 36px));
-    padding: 26px;
-    border: 1px solid var(--border-main);
-    border-radius: 18px;
-    background: var(--bg-card);
-    box-shadow: 0 24px 70px rgba(0, 0, 0, .55);
-}
-
-.backup-modal-card h2 {
-    color: var(--text-bright);
-    margin-bottom: 10px;
-}
-
-.backup-modal-card p {
-    color: var(--text-muted);
-    line-height: 1.5;
-}
-
-.backup-modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-top: 24px;
-}
-
-.backup-modal-actions .btn {
-    border-radius: 999px;
-    padding: 10px 16px;
-    border: 1px solid var(--accent-blue);
-    cursor: pointer;
-    font: inherit;
-    font-weight: 700;
-}
-
-.backup-modal-actions .btn-primary {
-    background: var(--accent-blue);
-    color: #06111e;
-}
-
-.backup-modal-actions .btn-secondary {
-    background: transparent;
-    color: var(--text-main);
-    border-color: var(--border-main);
-}
-
-@media (max-width: 800px) {
-    .backup-heading {
-        align-items: stretch;
-        flex-direction: column;
-    }
-
-    .backup-card {
-        grid-template-columns: 1fr 1fr;
-        gap: 14px;
-    }
-
-    .backup-actions {
-        grid-column: 1 / -1;
-        justify-content: stretch;
-    }
-
-    .backup-actions button {
-        flex: 1;
-    }
-}
+	window.initializeBackupManager = render;
+	document.addEventListener('DOMContentLoaded', () => {
+		document.getElementById('manual-backup-btn').addEventListener('click', createBackup);
+		document.getElementById('open-folder-btn').addEventListener('click', () => {
+			if (backupBridge) {
+				backupBridge.openBackupFolder((result) => {
+					if (!result || result.ok === false) {
+						renderFailure(
+							(result && result.error) || 'Could not open the Ankimon_Backups folder.',
+							result && result.traceback,
+						);
+					}
+				});
+			} else {
+				renderError('Backup Manager is still connecting to Ankimon.');
+			}
+		});
+		document.getElementById('backup-modal-cancel').addEventListener('click', closeModal);
+		document.getElementById('backup-modal-confirm').addEventListener('click', () => {
+			const action = modalAction;
+			closeModal();
+			if (action) action();
+		});
+		document.getElementById('backup-modal').addEventListener('click', (event) => {
+			if (event.target.id === 'backup-modal') closeModal();
+		});
+		document.addEventListener('keydown', (event) => {
+			if (event.key === 'Escape') closeModal();
+		});
+		document.getElementById('close-btn').addEventListener('click', () => {
+			if (window.navBridge) window.navBridge.closeWindow();
+		});
+		new QWebChannel(qt.webChannelTransport, (channel) => {
+			backupBridge = channel.objects.backup;
+			window.navBridge = channel.objects.nav;
+			window.wireNavSwitcher(window.navBridge);
+			refresh();
+		});
+	});
+})();
