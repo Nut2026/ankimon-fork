@@ -149,6 +149,7 @@ def create_menu_actions(
         w.show()
         w.raise_()
         w.activateWindow()
+        return w
 
     if database_complete:
         # Pokémon PC
@@ -239,7 +240,11 @@ def create_menu_actions(
 
     cancel_import_action = QAction("Cancel Pending Save Import", mw)
     cancel_import_action.setMenuRole(QAction.MenuRole.NoRole)
-    cancel_import_action.triggered.connect(cancel_pending_save_import)
+    def _cancel_pending_save_import_in_backup_manager():
+        window = _open_shell_at("backup_manager")
+        cancel_pending_save_import(notify=window.show_backup_notice)
+
+    cancel_import_action.triggered.connect(_cancel_pending_save_import_in_backup_manager)
     game_menu.addAction(cancel_import_action)
 
     recovery_action = QAction("Browse Pre-import Recovery Saves…", mw)
