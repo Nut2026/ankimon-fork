@@ -799,12 +799,20 @@ def _holds_kept_journals(folder: Optional[Path]) -> bool:
         return False
 
 
-def cancel_pending_save_import() -> None:
+def cancel_pending_save_import(notify=None) -> None:
     """Cancel staged imports for either save mode, and report what was found."""
     from ..events import events
     from ..save_import import (
         cancel_pending_import, pending_import_is_installed, pending_import_recovery_copy,
     )
+
+    def report(message, is_error=False):
+        if notify is not None:
+            notify(message, is_error)
+        elif is_error:
+            showWarning(message)
+        else:
+            showInfo(message)
 
     cancelled, already_installed, undetermined, failures = [], [], [], []
     without_copy, journals_kept = set(), set()
@@ -876,13 +884,15 @@ def cancel_pending_save_import() -> None:
             # Another save may already be settled, its event emitted. Naming only
             # the failure would tell the user that did not happen.
             message += "\n\nMeanwhile:\n\n" + "\n\n".join(outcomes)
-        showWarning(message
-                    + "\n\nClose anything using the Ankimon folder and try again.")
+        report(
+            message + "\n\nClose anything using the Ankimon folder and try again.",
+            True,
+        )
         return
     if not outcomes:
-        showInfo("There is no pending save import for either save mode.")
+        report("There is no pending save import for either save mode.")
         return
-    showInfo("\n\n".join(outcomes))
+    report("\n\n".join(outcomes))
 
 
 def browse_recovered_saves() -> None:
