@@ -15,9 +15,9 @@
  *  - Lets you create a brand-new backup of your current save with a single
  *    click, after a quick confirmation popup.
  *
- *  - Lets you restore an old backup. This replaces your current save with
- *    the chosen one and then restarts Anki so the change takes effect.
- *    It always asks for confirmation first, since it's destructive.
+ *  - Lets you prepare an old backup for the next full Anki restart. The
+ *    current save stays active until then, and the UI keeps restart and
+ *    cancellation guidance visible after staging.
  *
  *  - Lets you delete a backup you no longer want, again with a
  *    confirmation popup to prevent accidents.
@@ -54,6 +54,9 @@
 	let modalAction = null;
 	let restoreResultHandler = null;
 	let createResultHandler = null;
+	let contextToken = null;
+	let actionInProgress = false;
+	let listRequest = 0;
 
 	window.onBackupRestored = (result) => {
 		if (restoreResultHandler) {
@@ -77,6 +80,8 @@
 			return;
 		}
 		const backups = (data && data.backups) || [];
+		contextToken = data.context || null;
+		renderPendingStatus(data.pending);
 		const list = document.getElementById('backup-list');
 		list.replaceChildren();
 		if (!backups.length) {
@@ -128,14 +133,28 @@
 			cashRow.className = 'backup-cash';
 			cashRow.textContent = money(backup.trainer_cash);
 
-			card.append(actions, dateRow, trainerRow, statRow, cashRow);
+			const details = document.createElement('div');
+			details.className = 'backup-details';
+			const saveMeta = document.createElement('div');
+			saveMeta.className = 'backup-detail-group backup-save-meta';
+			saveMeta.append(dateRow, statRow);
+			const trainerMeta = document.createElement('div');
+			trainerMeta.className = 'backup-detail-group backup-trainer-meta';
+			trainerMeta.append(trainerRow, cashRow);
+			details.append(saveMeta, trainerMeta);
+			card.append(details, actions);
 
 			actions.addEventListener('click', (event) => event.stopPropagation());
 			restoreBtn.addEventListener('click', () => {
+				const confirmedContext = contextToken;
+				if (!confirmedContext) {
+					showToast('Backup Manager has not confirmed the active account and profile yet.', true);
+					return;
+				}
 				openModal(
-					'Restore and Restart',
-					'This will replace your current Ankimon save with this backup and restart Anki. Continue?',
-					() => restoreBackup(backup.path),
+					'Prepare Restore',
+					'This prepares the selected backup for the next full Anki restart. Your current save stays active until then. Continue?',
+					() => restoreBackup(backup.path, confirmedContext),
 				);
 			});
 			deleteBtn.addEventListener('click', () => {
@@ -143,14 +162,90 @@
 			});
 			list.appendChild(card);
 		});
+		setActionBusy(actionInProgress);
 	}
 
 	function refresh() {
 		if (backupBridge) {
-			backupBridge.getBackups(render);
+			const request = ++listRequest;
+			backupBridge.getBackups((data) => {
+				if (request === listRequest) render(data);
+			});
 		} else {
 			renderError('Backup Manager is still connecting to Ankimon.');
 		}
+	}
+
+	function renderPendingStatus(pending) {
+		const status = document.getElementById('backup-status');
+		status.replaceChildren();
+		if (!pending) {
+			status.classList.add('hidden');
+			return;
+		}
+
+		const title = document.createElement('strong');
+		title.textContent = 'Save replacement prepared for the next full Anki restart';
+		const message = document.createElement('p');
+		message.textContent = pending.message;
+		status.append(title, message);
+
+		let warning = pending.warning || '';
+		if (!warning && pending.token) {
+			try {
+				warning = localStorage.getItem(`ankimon-backup-warning-${pending.token}`) || '';
+			} catch (error) {
+				console.warn('Could not read the saved restore warning.', error);
+			}
+		}
+		if (warning) {
+			const warningText = document.createElement('p');
+			warningText.className = 'backup-status-warning';
+			warningText.textContent = warning;
+			status.appendChild(warningText);
+		}
+		status.classList.remove('hidden');
+	}
+
+	function showPreparedStatus(warning, token) {
+		const status = document.getElementById('backup-status');
+		const pending = {
+			message: 'Your current save remains active until Anki fully exits. Restart Anki manually to install this restore. To cancel it, use Ankimon → Game → Cancel Pending Save Import.',
+			warning,
+			token,
+		};
+		if (warning && token) {
+			try {
+				localStorage.setItem(`ankimon-backup-warning-${token}`, warning);
+			} catch (error) {
+				console.warn('Could not save the restore warning for later.', error);
+			}
+		}
+		renderPendingStatus(pending);
+		status.scrollIntoView({ block: 'nearest' });
+	}
+
+	function setActionBusy(busy) {
+		document.getElementById('manual-backup-btn').disabled = busy;
+		document.getElementById('open-folder-btn').disabled = busy;
+		document.querySelectorAll('.backup-actions button').forEach((button) => {
+			button.disabled = busy;
+		});
+	}
+
+	function beginAction() {
+		if (actionInProgress) {
+			showToast('Another backup action is already in progress.', true);
+			return false;
+		}
+		actionInProgress = true;
+		setActionBusy(true);
+		return true;
+	}
+
+	function finishAction() {
+		actionInProgress = false;
+		setActionBusy(false);
 	}
 
 	function renderError(message) {
@@ -167,6 +262,10 @@
 	}
 
 	function renderFailure(message, trace) {
+		contextToken = null;
+		const status = document.getElementById('backup-status');
+		status.replaceChildren();
+		status.classList.add('hidden');
 		const empty = document.createElement('div');
 		empty.className = 'backup-empty backup-error';
 		const title = document.createElement('strong');
@@ -186,51 +285,68 @@
 			renderError('Backup Manager is still connecting to Ankimon.');
 			return;
 		}
+		const confirmedContext = contextToken;
+		if (!confirmedContext) {
+			showToast('Backup Manager has not confirmed the active account and profile yet.', true);
+			return;
+		}
 		openModal('Create New Backup', 'Create and save a backup of your current Ankimon data?', () => {
 			let completed = false;
+			if (!beginAction()) return;
 			const handleResult = (result) => {
 				if (!result || result.pending === true || completed) {
 					return;
 				}
 				completed = true;
 				createResultHandler = null;
+				finishAction();
 				if (result.ok === false) {
 					console.error(result.traceback || result.error || 'Could not create backup.');
 					showToast(result.error || 'Could not create backup.', true);
+					refresh();
 					return;
 				}
 				showToast('Manual backup created successfully!');
 				refresh();
 			};
 			createResultHandler = handleResult;
-			backupBridge.createBackup((result) => {
-				handleResult(result);
-			});
+			try {
+				backupBridge.createBackup(confirmedContext, handleResult);
+			} catch (error) {
+				handleResult({ ok: false, error: error.message });
+			}
 		});
 	}
 
 	function deleteBackup(path) {
-		if (!backupBridge || !path) return;
-		backupBridge.deleteBackup(path, (result) => {
+		if (!backupBridge || !path || !beginAction()) return;
+		let completed = false;
+		const handleResult = (result) => {
+			if (completed || !result || result.pending === true) return;
+			completed = true;
+			finishAction();
 			if (result && result.ok === false) {
 				console.error(result.traceback || result.error || 'Could not delete backup.');
 				showToast(result.error || 'Could not delete backup.', true);
+				refresh();
 				return;
 			}
 			showToast('Backup successfully deleted!');
 			refresh();
-		});
+		};
+		try {
+			backupBridge.deleteBackup(path, handleResult);
+		} catch (error) {
+			handleResult({ ok: false, error: error.message });
+		}
 	}
 
-	function restoreBackup(path) {
-		if (restoreResultHandler) {
-			showToast('A backup restoration is already in progress.', true);
-			return;
-		}
+	function restoreBackup(path, confirmedContext) {
 		if (!backupBridge || !path) {
 			showToast('Backup restoration failed. Please try again.', true);
 			return;
 		}
+		if (!confirmedContext || !beginAction()) return;
 		let completed = false;
 		const handleResult = (result) => {
 			if (!result || result.pending === true || completed) {
@@ -238,13 +354,12 @@
 			}
 			completed = true;
 			restoreResultHandler = null;
+			finishAction();
 
 			if (result.ok === true && result.pending_restart === true) {
-				showToast(
-					result.message ||
-						'Restore successfully staged! Please restart Anki manually to apply the restoration.',
-					false,
-				);
+				showPreparedStatus(result.warning || '', result.pending_token);
+				showToast('Restore prepared. Restart Anki fully to apply it.');
+				refresh();
 				return;
 			}
 
@@ -254,61 +369,80 @@
 					result.error || 'Backup restoration failed. Please try again.',
 					true,
 				);
+				refresh();
 				return;
 			}
 
-			showToast('Backup restoration succeeded! Restarting now...');
-			setTimeout(() => {
-				backupBridge.restartAnki((restartResult) => {
-					if (!restartResult || restartResult.ok !== false) {
-						return;
-					}
-					const detail =
-						(restartResult && restartResult.error) ||
-						'Anki could not be restarted automatically.';
-					console.error(detail);
-					showToast(
-						`${detail} Restore successfully staged! Please restart Anki manually to apply the replacement.`,
-						true,
-					);
-				});
-			}, 500);
+			showToast('Backup restoration failed. Please try again.', true);
+			refresh();
 		};
 		restoreResultHandler = handleResult;
-		backupBridge.restoreBackup(path, (result) => {
-			handleResult(result);
-		});
+		try {
+			backupBridge.restoreBackup(path, confirmedContext, handleResult);
+		} catch (error) {
+			handleResult({ ok: false, error: error.message });
+		}
 	}
 
 	function openModal(title, message, action) {
+		if (actionInProgress || modalAction) return;
 		document.getElementById('backup-modal-title').textContent = title;
 		document.getElementById('backup-modal-message').textContent = message;
 		document.getElementById('backup-modal-confirm').textContent = title;
+		document.getElementById('backup-modal-cancel').classList.remove('hidden');
+		document.querySelector('.backup-modal-card').classList.remove('error');
 		modalAction = action;
 		document.getElementById('backup-modal').classList.remove('hidden');
 		document.getElementById('backup-modal-confirm').focus();
 	}
 
+	window.showBackupNotice = (message, isError) => {
+		refresh();
+		document.getElementById('backup-modal-title').textContent =
+			isError ? 'Save Import Could Not Be Cancelled' : 'Save Import Status';
+		document.getElementById('backup-modal-message').textContent = message;
+		document.getElementById('backup-modal-cancel').classList.add('hidden');
+		document.getElementById('backup-modal-confirm').textContent = 'OK';
+		document.querySelector('.backup-modal-card').classList.toggle('error', Boolean(isError));
+		modalAction = null;
+		document.getElementById('backup-modal').classList.remove('hidden');
+		document.getElementById('backup-modal-confirm').focus();
+	};
+
 	function closeModal() {
 		modalAction = null;
 		document.getElementById('backup-modal').classList.add('hidden');
+		document.getElementById('backup-modal-cancel').classList.remove('hidden');
+		document.querySelector('.backup-modal-card').classList.remove('error');
 	}
 
 	window.initializeBackupManager = render;
 	document.addEventListener('DOMContentLoaded', () => {
 		document.getElementById('manual-backup-btn').addEventListener('click', createBackup);
 		document.getElementById('open-folder-btn').addEventListener('click', () => {
-			if (backupBridge) {
-				backupBridge.openBackupFolder((result) => {
+			if (!backupBridge) {
+				renderError('Backup Manager is still connecting to Ankimon.');
+				return;
+			}
+			if (beginAction()) {
+				let completed = false;
+				const handleResult = (result) => {
+					if (completed) return;
+					completed = true;
+					finishAction();
 					if (!result || result.ok === false) {
 						renderFailure(
 							(result && result.error) || 'Could not open the Ankimon_Backups folder.',
 							result && result.traceback,
 						);
+						showToast((result && result.error) || 'Could not open the backup folder.', true);
 					}
-				});
-			} else {
-				renderError('Backup Manager is still connecting to Ankimon.');
+				};
+				try {
+					backupBridge.openBackupFolder(handleResult);
+				} catch (error) {
+					handleResult({ ok: false, error: error.message });
+				}
 			}
 		});
 		document.getElementById('backup-modal-cancel').addEventListener('click', closeModal);
@@ -332,5 +466,10 @@
 			window.wireNavSwitcher(window.navBridge);
 			refresh();
 		});
+	});
+	window.addEventListener('focus', refresh);
+	window.addEventListener('pageshow', refresh);
+	document.addEventListener('visibilitychange', () => {
+		if (!document.hidden) refresh();
 	});
 })();
