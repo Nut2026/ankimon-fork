@@ -14,6 +14,8 @@ import time
 import traceback
 import threading
 import base64
+import hashlib
+from pathlib import Path
 from datetime import datetime
 import requests
 from aqt import QDialog, QVBoxLayout, QWebEngineView, QWebEnginePage, mw
@@ -1085,12 +1087,75 @@ class BackupBridge(QObject):
     def __init__(self, window):
         super().__init__()
         self._w = window
+        manager = getattr(window, "backup_manager", None)
+        if manager is not None:
+            if not hasattr(manager, "_web_action_lock"):
+                manager._web_action_lock = threading.Lock()
+            self._action_lock = manager._web_action_lock
+        else:
+            self._action_lock = threading.Lock()
+        self._action_active = False
+        self._action_state_lock = threading.Lock()
 
     def _manager(self):
         manager = getattr(self._w, "backup_manager", None)
         if manager is None:
             raise RuntimeError("Backup manager is not available.")
         return manager
+
+    def _context_token(self):
+        from ..services import services
+
+        manager = self._manager()
+        profile_manager = getattr(mw, "pm", None)
+        settings = getattr(services, "settings", None)
+        db = getattr(services, "db", None)
+        context = {
+            "profile": str(getattr(profile_manager, "name", "") or ""),
+            "profile_folder": str(manager._active_profile_folder() or ""),
+            "database": str(getattr(db, "db_path", "") or ""),
+            "account": str(settings.get("leaderboard.username", "") or "")
+            if settings is not None else "",
+            "trainer_id": str(settings.get("trainer.id", "") or "")
+            if settings is not None else "",
+            "trainer_name": str(settings.get("trainer.name", "") or "")
+            if settings is not None else "",
+        }
+        payload = json.dumps(context, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _context_matches(self, expected):
+        return bool(expected) and expected == self._context_token()
+
+    def _begin_action(self):
+        with self._action_state_lock:
+            if self._action_active or not self._action_lock.acquire(blocking=False):
+                return False
+            self._action_active = True
+            return True
+
+    def _end_action(self):
+        with self._action_state_lock:
+            if self._action_active:
+                self._action_active = False
+                self._action_lock.release()
+
+    def _deliver_action_result(self, callback_name, result, finished):
+        with finished["lock"]:
+            if finished["delivered"]:
+                return
+            finished["delivered"] = True
+        self._end_action()
+        try:
+            self._w.webview_backup.page().runJavaScript(
+                f"if (window.{callback_name}) window.{callback_name}({json.dumps(result)});"
+            )
+        except Exception as error:
+            manager = getattr(self._w, "backup_manager", None)
+            if manager is not None:
+                manager.logger.log(
+                    "error", f"Could not deliver Backup Manager action result: {error}",
+                )
 
     def _permitted_backup_paths(self, manager):
         """Return the set of resolved paths the manager currently lists as
@@ -1133,9 +1198,29 @@ class BackupBridge(QObject):
     def getBackups(self):
         try:
             manager = self._manager()
+            manager.refresh_profile_path()
+            pending = None
+            from ..services import services
+            if services.db is not None:
+                from ..save_import import pending_import_info
+
+                info = pending_import_info(Path(services.db.db_path))
+                if info is not None:
+                    pending = {
+                        "token": info["token"],
+                        "warning": info.get("warning", ""),
+                        "message": (
+                            "A save is prepared and will be installed on the next "
+                            "full Anki restart. Until then, this session keeps using "
+                            "the current save. Use Ankimon → Game → Cancel Pending "
+                            "Save Import to cancel it."
+                        ),
+                    }
             return {
                 "backups": manager.get_backups(include_inactive=True),
                 "path": str(manager.backups_path or ""),
+                "context": self._context_token(),
+                "pending": pending,
             }
         except Exception as error:
             return {
@@ -1143,8 +1228,8 @@ class BackupBridge(QObject):
                 "traceback": traceback.format_exc(),
             }
 
-    @pyqtSlot(result="QVariant")
-    def createBackup(self):
+    @pyqtSlot(str, result="QVariant")
+    def createBackup(self, expected_context):
         """Kick off backup creation off the GUI thread.
 
         Returns immediately with {"pending": True}; the result is pushed to
@@ -1154,60 +1239,87 @@ class BackupBridge(QObject):
         manager = getattr(self._w, "backup_manager", None)
         if manager is None:
             return {"ok": False, "error": "Backup manager is not available."}
+        if not self._context_matches(expected_context):
+            return {
+                "ok": False,
+                "error": "The confirmed account or Anki profile changed. Reopen Backup Manager and confirm again.",
+            }
+        if not self._begin_action():
+            return {"ok": False, "error": "Another backup action is already in progress."}
+        context_changed = [False]
 
         def run_backup(_col):
-            return manager.create_backup(manual=True, show_notifications=False)
+            manager.refresh_profile_path()
+
+            def validate_context():
+                if not self._context_matches(expected_context):
+                    context_changed[0] = True
+                    raise RuntimeError(
+                        "The confirmed account or Anki profile changed before the "
+                        "backup could be published."
+                    )
+
+            validate_context()
+            return manager.create_backup(
+                manual=True, show_notifications=False, before_publish=validate_context,
+            )
+
+        finished = {"lock": threading.Lock(), "delivered": False}
 
         def on_success(ok):
             result = {"ok": bool(ok)}
             if not ok:
                 result["error"] = (
-                    getattr(manager, "last_error", None)
-                    or "Could not create backup."
+                    "The confirmed account or Anki profile changed before the "
+                    "backup could be published. No backup was created."
+                    if context_changed[0]
+                    else getattr(manager, "last_error", None) or "Could not create backup."
                 )
                 tb = getattr(manager, "last_traceback", None)
                 if tb:
                     result["traceback"] = tb
-            try:
-                self._w.webview_backup.page().runJavaScript(
-                    f"if (window.onBackupCreated) window.onBackupCreated({json.dumps(result)});"
-                )
-            except Exception:
-                pass
+            self._deliver_action_result("onBackupCreated", result, finished)
             return result
 
         def on_error(exception):
             result = {
                 "ok": False,
-                "error": "Could not create backup.",
+                "error": (
+                    "The confirmed account or Anki profile changed before the "
+                    "backup could be published. No backup was created."
+                    if context_changed[0] else "Could not create backup."
+                ),
                 "traceback": "".join(traceback.format_exception(
                     type(exception), exception, exception.__traceback__,
                 )),
             }
-            try:
-                self._w.webview_backup.page().runJavaScript(
-                    f"if (window.onBackupCreated) window.onBackupCreated({json.dumps(result)});"
-                )
-            except Exception:
-                pass
+            self._deliver_action_result("onBackupCreated", result, finished)
 
         try:
             from aqt.operations import QueryOp
         except ImportError:
             # aqt.operations unavailable (very old Anki / test harness):
             # fall back to synchronous behaviour rather than dropping the call.
-            return on_success(run_backup(None))
+            try:
+                return on_success(run_backup(None))
+            except Exception as error:
+                on_error(error)
+                return {"ok": False, "error": str(error)}
 
-        op = QueryOp(parent=self._w, op=run_backup, success=on_success)
-        if hasattr(op, "failure"):
-            op.failure(on_error).without_collection().run_in_background()
-        else:
-            op.without_collection().run_in_background()
+        try:
+            op = QueryOp(parent=self._w, op=run_backup, success=on_success)
+            if hasattr(op, "failure"):
+                op.failure(on_error).without_collection().run_in_background()
+            else:
+                op.without_collection().run_in_background()
+        except Exception as error:
+            on_error(error)
+            return {"ok": False, "error": str(error)}
 
         return {"pending": True}
 
-    @pyqtSlot(str, result="QVariant")
-    def restoreBackup(self, backup_path):
+    @pyqtSlot(str, str, result="QVariant")
+    def restoreBackup(self, backup_path, expected_context):
         """Kick off restore off the GUI thread.
 
         Returns {"pending": True} immediately, or {"ok": False, ...} if the
@@ -1215,25 +1327,31 @@ class BackupBridge(QObject):
         window.onBackupRestored({"ok": True, "pending_restart": <bool>}).
         """
         try:
+            if not self._context_matches(expected_context):
+                raise ValueError(
+                    "The confirmed account or Anki profile changed. Reopen Backup Manager and confirm again."
+                )
             resolved = self._validate_backup_path(backup_path)
         except ValueError as error:
             return {"ok": False, "error": str(error)}
 
         manager = self._manager()
+        if not self._begin_action():
+            return {"ok": False, "error": "Another backup action is already in progress."}
+        from ..services import services
+        expected_target = str(services.db.db_path) if services.db is not None else ""
 
         def deliver_result(result):
-            try:
-                self._w.webview_backup.page().runJavaScript(
-                    f"if (window.onBackupRestored) window.onBackupRestored({json.dumps(result)});"
-                )
-            except Exception:
-                pass
+            self._deliver_action_result("onBackupRestored", result, finished)
+
+        finished = {"lock": threading.Lock(), "delivered": False}
 
         def launch_restore(confirm_unverified=False):
             def run_restore(_col):
                 return manager.restore_backup(
                     str(resolved), interactive=False,
                     confirm_unverified=confirm_unverified,
+                    context_validator=lambda: self._context_matches(expected_context),
                 )
 
             def on_success(restored):
@@ -1243,6 +1361,15 @@ class BackupBridge(QObject):
                         "error": "Backup restore returned an invalid result.",
                     }
                 elif restored.get("status") == "confirmation_required":
+                    if not self._context_matches(expected_context):
+                        deliver_result({
+                            "ok": False,
+                            "error": (
+                                "The confirmed account or Anki profile changed before "
+                                "damaged-save confirmation. Nothing was prepared."
+                            ),
+                        })
+                        return
                     try:
                         from aqt.utils import askUser
 
@@ -1260,15 +1387,42 @@ class BackupBridge(QObject):
                             "error": "Backup restoration cancelled.",
                         })
                         return
+                    if not self._context_matches(expected_context):
+                        deliver_result({
+                            "ok": False,
+                            "error": (
+                                "The confirmed account or Anki profile changed during "
+                                "damaged-save confirmation. Nothing was prepared."
+                            ),
+                        })
+                        return
                     launch_restore(confirm_unverified=True)
                     return
                 elif restored.get("status") == "staged":
                     result = {
                         "ok": True,
-                        "pending_restart": False,
+                        "pending_restart": True,
                     }
+                    warnings = []
                     if restored.get("warning"):
-                        result["warning"] = restored["warning"]
+                        warnings.append(restored["warning"])
+                    if confirm_unverified:
+                        warnings.append(
+                            "The current save was reported as damaged. It will be "
+                            "kept as-is in recovery before the selected backup is installed."
+                        )
+                    if warnings:
+                        result["warning"] = "\n\n".join(warnings)
+                    try:
+                        from ..save_import import pending_import_info
+
+                        pending = pending_import_info(Path(expected_target))
+                        if pending is not None:
+                            result["pending_token"] = pending["token"]
+                    except Exception as error:
+                        manager.logger.log(
+                            "error", f"Could not read the prepared restore status: {error}",
+                        )
                 else:
                     result = {
                         "ok": False,
@@ -1286,21 +1440,31 @@ class BackupBridge(QObject):
                 })
 
             if QueryOp is None:
-                on_success(run_restore(None))
+                try:
+                    on_success(run_restore(None))
+                except Exception as error:
+                    on_error(error)
                 return
 
-            op = QueryOp(parent=self._w, op=run_restore, success=on_success)
-            if hasattr(op, "failure"):
-                op.failure(on_error).without_collection().run_in_background()
-            else:
-                op.without_collection().run_in_background()
+            try:
+                op = QueryOp(parent=self._w, op=run_restore, success=on_success)
+                if hasattr(op, "failure"):
+                    op.failure(on_error).without_collection().run_in_background()
+                else:
+                    op.without_collection().run_in_background()
+            except Exception as error:
+                on_error(error)
 
         try:
             from aqt.operations import QueryOp
         except ImportError:
             QueryOp = None
 
-        launch_restore()
+        try:
+            launch_restore()
+        except Exception as error:
+            self._end_action()
+            return {"ok": False, "error": str(error)}
 
         return {"pending": True}
 
@@ -1330,9 +1494,12 @@ class BackupBridge(QObject):
 
     @pyqtSlot(str, result="QVariant")
     def deleteBackup(self, backup_path):
+        if not self._begin_action():
+            return {"ok": False, "error": "Another backup action is already in progress."}
         try:
             resolved = self._validate_backup_path(backup_path)
         except ValueError as error:
+            self._end_action()
             return {"ok": False, "error": str(error)}
         try:
             return self._w.backup_manager.delete_backup(
@@ -1340,9 +1507,13 @@ class BackupBridge(QObject):
             )
         except Exception as error:
             return {"ok": False, "error": str(error), "traceback": traceback.format_exc()}
+        finally:
+            self._end_action()
 
     @pyqtSlot(result="QVariant")
     def openBackupFolder(self):
+        if not self._begin_action():
+            return {"ok": False, "error": "Another backup action is already in progress."}
         try:
             manager = self._w.backup_manager
             manager.refresh_profile_path()
@@ -1358,6 +1529,8 @@ class BackupBridge(QObject):
             return {"ok": opened, "error": None if opened else "Qt could not open the backup path."}
         except Exception as error:
             return {"ok": False, "error": str(error), "traceback": traceback.format_exc()}
+        finally:
+            self._end_action()
 
 class AnkimonItemsWeb(QDialog):
     def __init__(
@@ -1548,6 +1721,7 @@ class AnkimonItemsWeb(QDialog):
         # entry (Mart vs Item Bag). Consumed by the next inventory push, then
         # cleared so later pushes (buy/use/reroll) don't reset the user's view.
         self.pending_view = None
+        self._pending_backup_notice = None
         # The first show() is fed by the open path; later re-shows refresh data.
         self._shown_once = False
 
@@ -1626,6 +1800,24 @@ class AnkimonItemsWeb(QDialog):
             )
         if self.current_screen == screen:
             self.push_screen_data()
+            if screen == SCREEN_BACKUP:
+                self._push_backup_notice()
+
+    def show_backup_notice(self, message, is_error=False):
+        self._pending_backup_notice = (str(message), bool(is_error))
+        if self.current_screen == SCREEN_BACKUP and SCREEN_BACKUP in self.ready_screens:
+            self._push_backup_notice()
+
+    def _push_backup_notice(self):
+        if self._pending_backup_notice is None:
+            return
+        message, is_error = self._pending_backup_notice
+        self._pending_backup_notice = None
+        self.webview_backup.page().runJavaScript(
+            "if (window.showBackupNotice) "
+            f"window.showBackupNotice({json.dumps(message)}, "
+            f"{'true' if is_error else 'false'});"
+        )
 
     def _apply_sprite_visibility(self, show_sprites, screens=None):
         """Hide raster sprite content without collapsing the surrounding UI.
