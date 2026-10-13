@@ -9,6 +9,7 @@ game objects. This module deliberately has no Anki, Qt, or services imports.
 from __future__ import annotations
 
 import errno
+from functools import wraps
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import uuid
@@ -30,6 +32,7 @@ _TIMEOUT = 30.0
 # shutdown backup does, rather than a full SQLite timeout per file per step.
 STARTUP_IMPORT_BUDGET = 30.0
 _PROCESS_ATTRIBUTE = "_ankimon_save_import_process"
+_STAGING_LOCK = threading.RLock()
 
 
 class ImportInstalledError(RuntimeError):
@@ -88,6 +91,14 @@ def _process_identity() -> str:
 def _paths(target: Path) -> tuple[Path, Path]:
     target = Path(target).resolve()
     return target, target.parent / f".ankimon-import-{target.name}"
+
+
+def _serialize_staging(operation):
+    @wraps(operation)
+    def serialized(*args, **kwargs):
+        with _STAGING_LOCK:
+            return operation(*args, **kwargs)
+    return serialized
 
 
 def _fsync_file(path: Path) -> None:
@@ -337,7 +348,8 @@ def pending_import_info(target: Path) -> dict | None:
             or not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{32}", token) is None
             or not isinstance(record.get("process"), str)
             or not isinstance(record.get("digest"), str)
-            or not isinstance(record.get("retain_unverified", False), bool)):
+            or not isinstance(record.get("retain_unverified", False), bool)
+            or ("warning" in record and not isinstance(record["warning"], str))):
         raise ValueError("The pending import record does not match this save")
     recovery = target.parent / "ankimon_recovery" / f"pre-import-{token}"
     return {
@@ -348,9 +360,10 @@ def pending_import_info(target: Path) -> dict | None:
     }
 
 
+@_serialize_staging
 def stage_import(
     snapshot: Path, target: Path, *, sanitize_credentials: bool = True,
-    retain_unverified: bool = False,
+    retain_unverified: bool = False, before_publish=None,
 ) -> dict:
     """Durably retain the chosen save without touching the runtime database.
 
@@ -366,6 +379,11 @@ def stage_import(
     ``damaged_save_question``, to replace a save that fails its integrity check.
     The install then keeps that save as it is, under ``unverified_path``, when it
     cannot keep a verified copy. It never relaxes the checks on the new save.
+
+    ``before_publish`` runs after the private snapshot and manifest are ready,
+    immediately before the manifest commit point. A failed guard leaves nothing
+    staged. The process-wide staging lock serializes this check-and-publish path
+    with other imports, rescues, and cancellations.
 
     Raises ``ImportStagedError`` when publication succeeded but a later step
     did not: the import is armed for the next start and can only be stopped by
@@ -409,6 +427,8 @@ def stage_import(
             json.dump(record, handle)
             handle.flush()
             os.fsync(handle.fileno())
+        if before_publish is not None:
+            before_publish()
         _retry_on_file_lock(lambda: os.replace(temp_manifest, directory / "pending.json"))
         published = True
     finally:
@@ -435,6 +455,34 @@ def stage_import(
         _remove_owned_copy(incoming)
         raise OSError("The published pending import disappeared before it could be read back")
     return info
+
+
+@_serialize_staging
+def set_pending_import_warning(target: Path, warning: str) -> bool:
+    """Persist a warning on an already-published pending import."""
+    if not isinstance(warning, str):
+        raise TypeError("A pending import warning must be text")
+    target, directory = _paths(target)
+    info = pending_import_info(target)
+    if info is None:
+        return False
+    manifest = directory / "pending.json"
+    temporary = directory / f"{info['token']}.{uuid.uuid4().hex}.warning.json"
+    try:
+        with manifest.open(encoding="utf-8") as handle:
+            record = json.load(handle)
+        if not isinstance(record, dict) or record.get("token") != info["token"]:
+            raise ValueError("The pending save changed while its warning was recorded")
+        record["warning"] = warning
+        with temporary.open("x", encoding="utf-8") as handle:
+            json.dump(record, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _retry_on_file_lock(lambda: os.replace(temporary, manifest))
+        _fsync_directory(directory)
+        return True
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _write_cancelled_record(manifest: Path, target: Path) -> None:
@@ -483,6 +531,7 @@ def _manifest_is_cancelled(manifest: Path) -> bool:
         return False
 
 
+@_serialize_staging
 def cancel_pending_import(target: Path) -> bool:
     """Cancel staged work even if its manifest is damaged.
 
