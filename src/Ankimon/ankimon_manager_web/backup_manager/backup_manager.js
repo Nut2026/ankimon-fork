@@ -56,6 +56,7 @@
 	let createResultHandler = null;
 	let contextToken = null;
 	let actionInProgress = false;
+	let bridgeActionBusy = false;
 	let listRequest = 0;
 
 	window.onBackupRestored = (result) => {
@@ -75,8 +76,10 @@
 	}
 
 	function render(data) {
+		bridgeActionBusy = Boolean(data && data.busy);
 		if (data && data.error) {
 			renderError(data.error);
+			setActionBusy(actionInProgress || bridgeActionBusy);
 			return;
 		}
 		const backups = (data && data.backups) || [];
@@ -86,6 +89,7 @@
 		list.replaceChildren();
 		if (!backups.length) {
 			list.innerHTML = '<div class="backup-empty">No backups found.</div>';
+			setActionBusy(actionInProgress || bridgeActionBusy);
 			return;
 		}
 		backups.forEach((backup) => {
@@ -162,7 +166,7 @@
 			});
 			list.appendChild(card);
 		});
-		setActionBusy(actionInProgress);
+		setActionBusy(actionInProgress || bridgeActionBusy);
 	}
 
 	function refresh() {
@@ -185,9 +189,17 @@
 		}
 
 		const title = document.createElement('strong');
-		title.textContent = 'Save replacement prepared for the next full Anki restart';
+		const state = pending.state || 'pending';
+		title.textContent = {
+			pending: 'Save replacement prepared for the next full Anki restart',
+			installed: 'Save import already installed',
+			unknown: 'Save import status could not be determined',
+			cancelled: 'Save import cancelled',
+		}[state] || 'Save import status';
 		const message = document.createElement('p');
-		message.textContent = pending.message;
+		message.textContent = pending.target
+			? `${pending.target}: ${pending.message}`
+			: pending.message;
 		status.append(title, message);
 
 		let warning = pending.warning || '';
@@ -207,9 +219,11 @@
 		status.classList.remove('hidden');
 	}
 
-	function showPreparedStatus(warning, token) {
+	function showPreparedStatus(warning, token, target) {
 		const status = document.getElementById('backup-status');
 		const pending = {
+			state: 'pending',
+			target,
 			message: 'Your current save remains active until Anki fully exits. Restart Anki manually to install this restore. To cancel it, use Ankimon → Game → Cancel Pending Save Import.',
 			warning,
 			token,
@@ -234,7 +248,7 @@
 	}
 
 	function beginAction() {
-		if (actionInProgress) {
+		if (actionInProgress || bridgeActionBusy) {
 			showToast('Another backup action is already in progress.', true);
 			return false;
 		}
@@ -245,7 +259,7 @@
 
 	function finishAction() {
 		actionInProgress = false;
-		setActionBusy(false);
+		setActionBusy(bridgeActionBusy);
 	}
 
 	function renderError(message) {
@@ -357,7 +371,9 @@
 			finishAction();
 
 			if (result.ok === true && result.pending_restart === true) {
-				showPreparedStatus(result.warning || '', result.pending_token);
+				showPreparedStatus(
+					result.warning || '', result.pending_token, result.pending_target,
+				);
 				showToast('Restore prepared. Restart Anki fully to apply it.');
 				refresh();
 				return;
