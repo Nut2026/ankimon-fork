@@ -508,7 +508,8 @@ class BackupManager:
         return backups
 
     def create_backup(self, manual=False, required_file: str = None,
-                      deadline: float = None, show_notifications: bool = True) -> bool:
+                      deadline: float = None, show_notifications: bool = True,
+                      before_publish=None) -> bool:
         """Creates a new backup.
 
         ``deadline`` is an absolute ``time.monotonic()`` instant that bounds the
@@ -596,6 +597,8 @@ class BackupManager:
 
                 if backup_dir.exists():
                     raise FileExistsError(f"Backup already exists: {backup_dir.name}")
+                if before_publish is not None:
+                    before_publish()
                 from ..save_import import _retry_on_file_lock
 
                 # On Windows a scanner still reading a snapshot just written
@@ -906,6 +909,7 @@ class BackupManager:
     def restore_backup(
         self, backup_path_str: str, interactive: bool = True,
         confirm_unverified: bool = False,
+        context_validator=None,
     ):
         """Stage the selected backup for the next full process start.
 
@@ -942,7 +946,15 @@ class BackupManager:
             pending_import_is_installed, should_confirm_unverified_copy, stage_import,
         )
 
+        def validate_context():
+            if context_validator is not None and not context_validator():
+                raise RuntimeError(
+                    "The confirmed account or Anki profile changed. "
+                    "Nothing was prepared; reopen Backup Manager and confirm again."
+                )
+
         try:
+            validate_context()
             if services.db is None:
                 message = "The Ankimon database is not initialized yet; cannot restore a backup."
                 if interactive:
@@ -965,6 +977,7 @@ class BackupManager:
                         "message": question,
                     }
 
+            validate_context()
             # Every confirmation can run the event loop while migration moves
             # the selection. Resolve after ALL dialogs and hold its source
             # stable until staging has finished, without waiting on the GUI.
@@ -975,6 +988,7 @@ class BackupManager:
                     return
                 return {"status": "failed", "error": message}
             try:
+                validate_context()
                 backup_file = self._resolve_backup_path(backup_path_str, target.name) / target.name
                 if not backup_file.is_file():
                     message = (
@@ -997,6 +1011,7 @@ class BackupManager:
                     pending = stage_import(
                         snapshot, target, sanitize_credentials=False,
                         retain_unverified=retain_unverified,
+                        before_publish=validate_context,
                     )
                 finally:
                     # Cleanup cannot turn a successfully armed restore into a
@@ -1046,6 +1061,15 @@ class BackupManager:
                 "recovery copy first. Use "
                 "Ankimon → Game → Cancel Pending Save Import if you do not want it."
             )
+            try:
+                from ..save_import import set_pending_import_warning
+
+                set_pending_import_warning(target, message)
+            except Exception as warning_error:
+                self.logger.log(
+                    "error",
+                    f"Could not persist the warning for a prepared backup restore: {warning_error}",
+                )
             if interactive:
                 self._warn_about_pending_import(message)
                 return
