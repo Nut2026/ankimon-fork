@@ -1064,7 +1064,14 @@ class BackupManager:
             try:
                 from ..save_import import set_pending_import_warning
 
-                set_pending_import_warning(target, message)
+                warning_saved = set_pending_import_warning(
+                    target, message, expected_token=e.token,
+                )
+                if not warning_saved:
+                    self.logger.log(
+                        "warning",
+                        "The prepared restore changed before its warning could be saved.",
+                    )
             except Exception as warning_error:
                 self.logger.log(
                     "error",
@@ -1073,7 +1080,9 @@ class BackupManager:
             if interactive:
                 self._warn_about_pending_import(message)
                 return
-            return {"status": "staged", "warning": message}
+            return {
+                "status": "staged", "warning": message, "pending_token": e.token,
+            }
         except Exception as e:
             self.logger.log("error", f"Failed to prepare backup restore: {e}")
             message = f"Failed to prepare backup restore: {e}"
@@ -1086,7 +1095,7 @@ class BackupManager:
         # so a failure to announce it must never be reported as one to prepare
         # it. Import keeps its own notice outside its guard for the same reason.
         if not interactive:
-            return {"status": "staged"}
+            return {"status": "staged", "pending_token": pending["token"]}
 
         try:
             showInfo(

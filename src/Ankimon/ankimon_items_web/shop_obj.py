@@ -1202,30 +1202,67 @@ class BackupBridge(QObject):
             pending = None
             from ..services import services
             if services.db is not None:
-                from ..save_import import pending_import_info
+                from ..save_import import pending_import_status
 
-                info = pending_import_info(Path(services.db.db_path))
-                if info is not None:
-                    pending = {
-                        "token": info["token"],
-                        "warning": info.get("warning", ""),
-                        "message": (
-                            "A save is prepared and will be installed on the next "
-                            "full Anki restart. Until then, this session keeps using "
-                            "the current save. Use Ankimon → Game → Cancel Pending "
-                            "Save Import to cancel it."
+                target = Path(services.db.db_path).resolve()
+                try:
+                    pending_status = pending_import_status(target)
+                except Exception as status_error:
+                    manager.logger.log(
+                        "error",
+                        f"Could not determine pending save import status: {status_error}",
+                    )
+                    pending_status = {
+                        "state": "unknown", "error": str(status_error),
+                    }
+                status = pending_status["state"]
+                if status != "none":
+                    info = pending_status.get("info", {})
+                    messages = {
+                        "pending": (
+                            "This save is prepared for installation at the next full "
+                            "Anki restart. The current session continues using its "
+                            "active save until then. Use Ankimon → Game → Cancel "
+                            "Pending Save Import to cancel it."
+                        ),
+                        "installed": (
+                            "This save import has already installed. Only its leftover "
+                            "record remains; use Ankimon → Game → Cancel Pending Save "
+                            "Import to clear it. It will not install again."
+                        ),
+                        "unknown": (
+                            "Ankimon could not determine whether this save import has "
+                            "installed. Use Ankimon → Game → Cancel Pending Save Import "
+                            "before choosing another save."
+                        ),
+                        "cancelled": (
+                            "This save import was cancelled and will not install."
                         ),
                     }
+                    pending = {
+                        "state": status,
+                        "target": target.name,
+                        "token": info.get("token"),
+                        "warning": info.get("warning", ""),
+                        "message": messages[status],
+                    }
+                    if pending_status.get("error"):
+                        pending["message"] += f" Details: {pending_status['error']}"
+            with self._action_state_lock:
+                busy = self._action_active or self._action_lock.locked()
             return {
                 "backups": manager.get_backups(include_inactive=True),
                 "path": str(manager.backups_path or ""),
                 "context": self._context_token(),
                 "pending": pending,
+                "busy": busy,
             }
         except Exception as error:
+            with self._action_state_lock:
+                busy = self._action_active or self._action_lock.locked()
             return {
                 "backups": [], "path": "", "error": str(error),
-                "traceback": traceback.format_exc(),
+                "traceback": traceback.format_exc(), "busy": busy,
             }
 
     @pyqtSlot(str, result="QVariant")
@@ -1266,7 +1303,14 @@ class BackupBridge(QObject):
 
         finished = {"lock": threading.Lock(), "delivered": False}
 
-        def on_success(ok):
+        def finish_without_push():
+            with finished["lock"]:
+                if finished["delivered"]:
+                    return
+                finished["delivered"] = True
+            self._end_action()
+
+        def on_success(ok, notify=True):
             result = {"ok": bool(ok)}
             if not ok:
                 result["error"] = (
@@ -1278,10 +1322,13 @@ class BackupBridge(QObject):
                 tb = getattr(manager, "last_traceback", None)
                 if tb:
                     result["traceback"] = tb
-            self._deliver_action_result("onBackupCreated", result, finished)
+            if notify:
+                self._deliver_action_result("onBackupCreated", result, finished)
+            else:
+                finish_without_push()
             return result
 
-        def on_error(exception):
+        def on_error(exception, notify=True):
             result = {
                 "ok": False,
                 "error": (
@@ -1293,7 +1340,11 @@ class BackupBridge(QObject):
                     type(exception), exception, exception.__traceback__,
                 )),
             }
-            self._deliver_action_result("onBackupCreated", result, finished)
+            if notify:
+                self._deliver_action_result("onBackupCreated", result, finished)
+            else:
+                finish_without_push()
+            return result
 
         try:
             from aqt.operations import QueryOp
@@ -1301,10 +1352,9 @@ class BackupBridge(QObject):
             # aqt.operations unavailable (very old Anki / test harness):
             # fall back to synchronous behaviour rather than dropping the call.
             try:
-                return on_success(run_backup(None))
+                return on_success(run_backup(None), notify=False)
             except Exception as error:
-                on_error(error)
-                return {"ok": False, "error": str(error)}
+                return on_error(error, notify=False)
 
         try:
             op = QueryOp(parent=self._w, op=run_backup, success=on_success)
@@ -1411,18 +1461,34 @@ class BackupBridge(QObject):
                             "The current save was reported as damaged. It will be "
                             "kept as-is in recovery before the selected backup is installed."
                         )
+                    pending_token = restored.get("pending_token")
+                    if not isinstance(pending_token, str) or not pending_token:
+                        manager.logger.log(
+                            "error",
+                            "Backup restore completed without returning its staged token.",
+                        )
+                    elif warnings:
+                        try:
+                            from ..save_import import set_pending_import_warning
+
+                            if not set_pending_import_warning(
+                                Path(expected_target), "\n\n".join(warnings),
+                                expected_token=pending_token,
+                            ):
+                                manager.logger.log(
+                                    "warning",
+                                    "The staged restore changed before its warning could be saved.",
+                                )
+                        except Exception as error:
+                            manager.logger.log(
+                                "error",
+                                f"Could not persist the prepared restore warning: {error}",
+                            )
                     if warnings:
                         result["warning"] = "\n\n".join(warnings)
-                    try:
-                        from ..save_import import pending_import_info
-
-                        pending = pending_import_info(Path(expected_target))
-                        if pending is not None:
-                            result["pending_token"] = pending["token"]
-                    except Exception as error:
-                        manager.logger.log(
-                            "error", f"Could not read the prepared restore status: {error}",
-                        )
+                    if isinstance(pending_token, str) and pending_token:
+                        result["pending_token"] = pending_token
+                        result["pending_target"] = Path(expected_target).name
                 else:
                     result = {
                         "ok": False,

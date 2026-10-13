@@ -53,6 +53,10 @@ class ImportStagedError(RuntimeError):
     cannot happen. Cancelling is the only way to stop it.
     """
 
+    def __init__(self, message: str, token: str):
+        super().__init__(message)
+        self.token = token
+
 
 class ImportUnsafeToOpenError(RuntimeError):
     """A pending import's save is missing, and journals are still beside it.
@@ -361,6 +365,29 @@ def pending_import_info(target: Path) -> dict | None:
 
 
 @_serialize_staging
+def pending_import_status(target: Path) -> dict:
+    """Describe whether this save has pending, installed, or cancelled work."""
+    target, directory = _paths(target)
+    info = pending_import_info(target)
+    if info is None:
+        state = (
+            "cancelled"
+            if _manifest_is_cancelled(directory / "pending.json")
+            else "none"
+        )
+        return {"state": state}
+
+    installed = pending_import_is_installed(target)
+    if installed is True:
+        state = "installed"
+    elif installed is False:
+        state = "pending"
+    else:
+        state = "unknown"
+    return {"state": state, "info": info}
+
+
+@_serialize_staging
 def stage_import(
     snapshot: Path, target: Path, *, sanitize_credentials: bool = True,
     retain_unverified: bool = False, before_publish=None,
@@ -448,7 +475,7 @@ def stage_import(
         _fsync_directory(target.parent)
         info = pending_import_info(target)
     except Exception as error:
-        raise ImportStagedError(str(error)) from error
+        raise ImportStagedError(str(error), token) from error
     if info is None:
         # The manifest vanished between publishing and reading it back, so
         # nothing will install after all; do not strand the staged copy.
@@ -458,20 +485,26 @@ def stage_import(
 
 
 @_serialize_staging
-def set_pending_import_warning(target: Path, warning: str) -> bool:
+def set_pending_import_warning(
+    target: Path, warning: str, expected_token: str | None = None,
+) -> bool:
     """Persist a warning on an already-published pending import."""
     if not isinstance(warning, str):
         raise TypeError("A pending import warning must be text")
     target, directory = _paths(target)
     info = pending_import_info(target)
-    if info is None:
+    if (info is None
+            or (expected_token is not None and info["token"] != expected_token)):
         return False
     manifest = directory / "pending.json"
     temporary = directory / f"{info['token']}.{uuid.uuid4().hex}.warning.json"
     try:
         with manifest.open(encoding="utf-8") as handle:
             record = json.load(handle)
-        if not isinstance(record, dict) or record.get("token") != info["token"]:
+        if (not isinstance(record, dict)
+                or record.get("token") != info["token"]
+                or (expected_token is not None
+                    and record.get("token") != expected_token)):
             raise ValueError("The pending save changed while its warning was recorded")
         record["warning"] = warning
         with temporary.open("x", encoding="utf-8") as handle:
