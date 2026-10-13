@@ -19,6 +19,7 @@
         pokeball: 'Ball',
         evolution: 'Evolution',
         fossil: 'Fossil',
+        ev: 'EV Training',
         other: '',
     };
 
@@ -643,6 +644,7 @@
             case 'fossil': return 'Revive Fossil';
             case 'pokeball': return 'Throw at Wild Pokémon';
             case 'evolution': return 'Evolve a Pokémon';
+            case 'ev': return 'Train Active Pokémon';
             default: return 'Give to a Pokémon';
         }
     }

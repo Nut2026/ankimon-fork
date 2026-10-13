@@ -960,6 +960,48 @@ def get_pokemon_diff_lang_name(pokemon_id: int, language: int):
     return "No Translation in this language"
 
 
+def resolve_display_name(pokemon_id: int, internal_name: str, nickname: str, language: int) -> str:
+    """The name a player should see for one Pokémon: nickname if meaningfully
+    custom, else the current-language pretty name.
+
+    Shared by ``PokemonObject.display_name`` and anywhere else (the web bag's
+    item-target picker, say) that has the raw id/name/nickname fields but not
+    a full ``PokemonObject`` to read the property off of — both must agree,
+    or a JP/DE/… player sees different names for the same Pokémon depending
+    on which screen they're looking at.
+    """
+    pretty_name = get_pokemon_diff_lang_name(pokemon_id, language)
+    if pretty_name == "No Translation in this language":
+        pretty_name = get_pretty_name_for_name(internal_name)
+
+    # The English pretty name -- the catch flow auto-stores THIS as the
+    # "nickname" regardless of the current language, so a JP/DE/... player
+    # would otherwise see "Paldean Wooper" instead of the localized form.
+    english_name = get_pretty_name_for_name(internal_name)
+
+    if nickname:
+        def _normalize(s):
+            return (
+                str(s)
+                .lower()
+                .replace(" ", "")
+                .replace("-", "")
+                .replace("'", "")
+                .replace(".", "")
+                .replace(":", "")
+            )
+
+        norm_nick = _normalize(nickname)
+        if norm_nick not in (
+            _normalize(internal_name),
+            _normalize(pretty_name),
+            _normalize(english_name),
+        ):
+            return nickname
+
+    return pretty_name
+
+
 def extract_ids_from_file():
     try:
         # get_all_pokemon_ids returns a set of integer IDs natively from SQLite virtual columns

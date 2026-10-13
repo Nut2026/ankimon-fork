@@ -1856,6 +1856,8 @@ class AnkimonItemsWeb(QDialog):
                 return "pokeball"
             if name in getattr(bag, "evolution_items", set()):
                 return "evolution"
+            if name in getattr(bag, "ev_items", set()):
+                return "ev"
         return "other"
 
     def _lookup_price(self, name):
@@ -2062,14 +2064,22 @@ class AnkimonItemsWeb(QDialog):
             main_individual_id = getattr(bag.main_pokemon, "individual_id", None)
 
         pokedex_data = _load_pokedex_cache()
-        from ..functions.pokedex_functions import search_pokedex_by_id
+        from ..functions.pokedex_functions import (
+            resolve_display_name,
+            search_pokedex_by_id,
+        )
 
         # Pre-fetch the region setting to avoid repeated lookups
         active_region = None
+        lang = 9
         if services.settings:
             active_region = services.settings.get("misc.active_region")
             if active_region:
                 active_region = active_region.strip()
+            try:
+                lang = int(services.settings.get("misc.language", 9))
+            except (TypeError, ValueError):
+                lang = 9
 
         choices = []
         for data in pokemons:
@@ -2099,11 +2109,22 @@ class AnkimonItemsWeb(QDialog):
                 if p_details:
                     base_id = p_details.get("species_id") or pokedex_id
 
+                # Localized nickname-or-pretty-name, matching what the HUD and
+                # every other screen call this same Pokémon — this picker used
+                # to show the raw internal name (English, unformatted) no
+                # matter the player's language setting.
+                try:
+                    display_name = resolve_display_name(
+                        int(pokedex_id), name, nickname, lang
+                    )
+                except (TypeError, ValueError):
+                    display_name = nickname or name
+
                 entry = {
                     "id": individual_id,
                     "p": pokedex_id or 0,
                     "b": base_id or 0,
-                    "n": name,
+                    "n": display_name,
                     "l": int(level) if level is not None else None,
                     "cp": calculate_cp_from_dict(data),
                 }

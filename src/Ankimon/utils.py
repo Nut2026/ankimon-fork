@@ -354,19 +354,6 @@ USELESS_ITEMS = {
     "old-gateau",
     "heal-powder",
     "paralyze-heal",
-    # Non-battle stat=ups or contests
-    "calcium",
-    "carbos",
-    "clever-wing",
-    "genius-wing",
-    "health-wing",
-    "hp-up",
-    "iron",
-    "muscle-wing",
-    "protein",
-    "resist-wing",
-    "swift-wing",
-    "zinc",
     # Rare candy and PP / elixirs
     "rare-candy",
     "pp-max",
@@ -445,10 +432,23 @@ def random_item() -> Optional[str]:
     return item_name
 
 
-# Supply missing icons for older downloaded packs.
+# Supply missing icons for older downloaded packs, and for items this add-on
+# implements that were never part of the downloaded sprite pack at all (the
+# effort candies and mochi: placeholder icons, since no official art exists
+# in that pack to fall back to).
 _BUNDLED_ITEM_SPRITES = {
     "linking-cord": addon_dir / "addon_sprites" / "items" / "linking-cord.png",
 }
+for _prefix in ("health", "muscle", "resist", "genius", "clever", "swift"):
+    _BUNDLED_ITEM_SPRITES[f"{_prefix}-mochi"] = (
+        addon_dir / "addon_sprites" / "items" / f"{_prefix}-mochi.png"
+    )
+for _prefix in ("health", "mighty", "tough", "smart", "courage", "quick"):
+    for _suffix in ("", "-l", "-xl"):
+        _BUNDLED_ITEM_SPRITES[f"{_prefix}-candy{_suffix}"] = (
+            addon_dir / "addon_sprites" / "items" / f"{_prefix}-candy{_suffix}.png"
+        )
+del _prefix, _suffix
 
 
 def get_item_sprite_path(item_name):
