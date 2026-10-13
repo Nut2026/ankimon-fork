@@ -13,9 +13,9 @@
 
   - Layout for the main content area and its heading ("Available Backups").
 
-  - Styling for the backup list and each backup card. Cards are laid out
-    as a five-column grid: action buttons, date, trainer + main Pokémon,
-    stats, and cash. They gently lift and highlight on hover.
+  - Styling for the backup list and each backup card. Backup metadata is
+    grouped into two compact columns; at narrower widths the actions move
+    below the details and a dashed divider separates the metadata groups.
 
   - Smaller typographic rules for the labels inside each card, plus a
     monospaced gold style for the cash value.
@@ -30,9 +30,7 @@
   - A toast element (shared class .shop-toast, mostly styled elsewhere)
     that the JavaScript uses for short success/failure messages.
 
-  - A responsive tweak for narrow windows: the heading stacks, cards
-    collapse to two columns, and the action buttons stretch full width
-    so they're easy to tap.
+  - Responsive card and modal layouts for narrow windows.
 */
 
 :root {
@@ -64,16 +62,58 @@
     gap: 12px;
 }
 
+.backup-status {
+    margin-bottom: 18px;
+    padding: 16px 18px;
+    border: 1px solid var(--accent-blue);
+    border-radius: 12px;
+    color: var(--text-main);
+    background: var(--bg-card);
+    line-height: 1.5;
+}
+
+.backup-status.hidden {
+    display: none;
+}
+
+.backup-status strong {
+    display: block;
+    color: var(--text-bright);
+}
+
+.backup-status p {
+    margin: 8px 0 0;
+}
+
+.backup-status-warning {
+    color: #ffcc80;
+}
+
 .backup-card {
     display: grid;
-    grid-template-columns: auto 150px minmax(0, 1fr) auto auto;
-    gap: 20px;
+    grid-template-columns: max-content max-content;
+    justify-content: start;
+    gap: 14px 16px;
     align-items: center;
     background: var(--bg-card);
     border: 1px solid var(--border-main);
     border-radius: 12px;
     padding: 18px 20px;
     transition: border-color .15s ease, transform .15s ease;
+}
+
+.backup-details {
+    display: grid;
+    grid-template-columns: minmax(135px, .8fr) minmax(200px, 1.2fr);
+    align-items: center;
+    gap: 24px;
+    min-width: 0;
+}
+
+.backup-detail-group {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
 }
 
 .backup-card:hover {
@@ -101,8 +141,9 @@
 
 .backup-stat {
     display: grid;
-    gap: 4px;
-    text-align: right;
+    grid-template-columns: auto auto;
+    justify-content: start;
+    gap: 4px 12px;
     white-space: nowrap;
 }
 
@@ -116,6 +157,8 @@
     display: flex;
     gap: 8px;
     justify-content: flex-start;
+    border-left: 1px dashed var(--border-main);
+    padding-left: 16px;
 }
 
 .backup-actions button {
@@ -133,6 +176,13 @@
 .backup-actions button:hover {
     border-color: var(--accent-blue);
     color: var(--text-bright);
+}
+
+.backup-actions button:disabled,
+#manual-backup-btn:disabled,
+#open-folder-btn:disabled {
+    cursor: wait;
+    opacity: .6;
 }
 
 .backup-actions .restore-btn {
@@ -225,11 +275,17 @@
 
 .backup-modal-card {
     width: min(420px, calc(100vw - 36px));
+    max-height: calc(100vh - 36px);
+    overflow: auto;
     padding: 26px;
     border: 1px solid var(--border-main);
     border-radius: 18px;
     background: var(--bg-card);
     box-shadow: 0 24px 70px rgba(0, 0, 0, .55);
+}
+
+.backup-modal-card.error {
+    border-color: var(--backup-danger);
 }
 
 .backup-modal-card h2 {
@@ -240,6 +296,7 @@
 .backup-modal-card p {
     color: var(--text-muted);
     line-height: 1.5;
+    white-space: pre-line;
 }
 
 .backup-modal-actions {
@@ -269,23 +326,92 @@
     border-color: var(--border-main);
 }
 
-@media (max-width: 800px) {
+.backup-modal-actions .btn.hidden {
+    display: none;
+}
+
+@media (max-width: 1100px) {
+    .backup-content {
+        padding: 24px 22px 48px;
+    }
+
+    .backup-heading {
+        align-items: flex-start;
+    }
+
+    .backup-card {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 14px;
+    }
+
+    .backup-details {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 18px;
+    }
+
+    .backup-trainer-meta {
+        border: 0;
+        padding: 0;
+    }
+
+    .backup-actions {
+        grid-column: 1;
+        justify-content: flex-start;
+        border-left: 0;
+        border-top: 1px dashed var(--border-main);
+        padding: 12px 0 0;
+    }
+
+    .backup-actions button {
+        flex: 0 1 auto;
+    }
+
+    .backup-trainer,
+    .backup-date {
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+}
+
+@media (max-width: 600px) {
+    .backup-content {
+        padding: 18px 14px 40px;
+    }
+
     .backup-heading {
         align-items: stretch;
         flex-direction: column;
     }
 
     .backup-card {
-        grid-template-columns: 1fr 1fr;
-        gap: 14px;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 12px;
+        padding: 16px;
+    }
+
+    .backup-details {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 12px;
+    }
+
+    .backup-stat {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .backup-trainer-meta {
+        border: 0;
+        padding: 0;
     }
 
     .backup-actions {
-        grid-column: 1 / -1;
-        justify-content: stretch;
+        grid-column: 1;
+        flex-direction: column;
     }
 
     .backup-actions button {
-        flex: 1;
+        flex: none;
+        width: 100%;
+        box-sizing: border-box;
+        white-space: normal;
     }
 }
