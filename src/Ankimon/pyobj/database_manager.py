@@ -1881,7 +1881,11 @@ class AnkimonDB:
         return consumed
 
     def consume_item_and_save_main_pokemon(
-        self, item_name: str, pokemon_data: Dict[str, Any]
+        self,
+        item_name: str,
+        pokemon_data: Dict[str, Any],
+        *,
+        expected_pokemon_data: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Spend one item and update the existing main Pokemon atomically.
 
@@ -1890,6 +1894,8 @@ class AnkimonDB:
         or reporting success before the item and Pokemon are durable. It only
         updates data for the still-current individual, so a stale item window
         cannot recreate a deleted Pokemon or switch the main selection.
+        When supplied, the expected persisted record must still match after
+        acquiring the writer lock; a concurrent reward/edit is never overwritten.
         """
         if not isinstance(item_name, str) or not item_name:
             return False
@@ -1897,6 +1903,11 @@ class AnkimonDB:
             return False
         individual_id = pokemon_data.get("individual_id")
         if not isinstance(individual_id, str) or not individual_id:
+            return False
+        if expected_pokemon_data is not None and (
+            not isinstance(expected_pokemon_data, dict)
+            or expected_pokemon_data.get("individual_id") != individual_id
+        ):
             return False
         # Serialization can fail; do it before acquiring a lock or charging.
         obfuscated_data = self._obfuscate(pokemon_data)
@@ -1917,11 +1928,15 @@ class AnkimonDB:
                     cursor.execute("BEGIN IMMEDIATE")
                     began_transaction = True
                     cursor.execute(
-                        "SELECT 1 FROM captured_pokemon "
+                        "SELECT data FROM captured_pokemon "
                         "WHERE individual_id = ? AND is_main = 1",
                         (individual_id,),
                     )
-                    if cursor.fetchone() is None:
+                    current = cursor.fetchone()
+                    if current is None or (
+                        expected_pokemon_data is not None
+                        and self._deobfuscate(current[0]) != expected_pokemon_data
+                    ):
                         conn.rollback()
                         return False
                     cursor.execute(

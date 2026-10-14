@@ -57,7 +57,9 @@ def _run(directory):
     form["held_item"] = "leftovers"
     default = build_pokemon({"id": 133, "level": 30}).to_dict()
     default["nickname"] = get_pretty_name_for_name(default["name"])
-    for row in (named, form, default):
+    punctuated = build_pokemon({"id": 122, "level": 30}).to_dict()
+    punctuated["nickname"] = get_pretty_name_for_name(punctuated["name"])
+    for row in (named, form, default, punctuated):
         db.save_pokemon(row)
     db.add_item("leftovers", 1)
 
@@ -67,7 +69,7 @@ def _run(directory):
     image.fill(QColor(120, 120, 200))
     sprites = Path(directory) / "sprites" / "front_default"
     sprites.mkdir(parents=True, exist_ok=True)
-    for row in (named, form, default):
+    for row in (named, form, default, punctuated):
         assert image.save(str(sprites / f"{row['id']}.png"))
     utils.items_path.mkdir(parents=True, exist_ok=True)
     assert image.save(str(utils.items_path / "leftovers.png"))
@@ -120,17 +122,21 @@ def _run(directory):
         )
         click('[data-item-name="leftovers"]')
         click(".det-action-btn.use")
-        expected_all = ["Sparky", "パルデアウパー", "イーブイ"]
+        expected_all = ["Sparky", "パルデアウパー", "イーブイ", "バリヤード"]
         assert _wait_until(lambda: card_names() == sorted(expected_all)), card_names()
 
         choices = window.get_pokemon_choices()["choices"]
         custom = next(c for c in choices if c["id"] == named["individual_id"])
         regional = next(c for c in choices if c["id"] == form["individual_id"])
         ordinary = next(c for c in choices if c["id"] == default["individual_id"])
+        formatted = next(c for c in choices if c["id"] == punctuated["individual_id"])
         assert custom["n"] == "ピカチュウ" and custom["nk"] == "Sparky"
         assert custom["a"] == "pikachu"
         assert regional["n"] == "パルデアウパー" and "nk" not in regional
+        assert regional["a"] == "wooperpaldea Paldean Wooper"
         assert ordinary["n"] == "イーブイ" and "nk" not in ordinary
+        assert formatted["n"] == "バリヤード" and "nk" not in formatted
+        assert formatted["a"] == "mrmime Mr. Mime"
         assert (
             js(
                 '[...document.querySelectorAll("#picker-grid .pokemon-card")]'
@@ -146,11 +152,15 @@ def _run(directory):
             ("ピカチュウ", ["Sparky"]),
             ("wooper", ["パルデアウパー"]),
             ("wooperpaldea", ["パルデアウパー"]),
+            ("Paldean Wooper", ["パルデアウパー"]),
             ("パルデアウパー", ["パルデアウパー"]),
             ("leftovers", ["パルデアウパー"]),
             ("eevee", ["イーブイ"]),
             ("イーブイ", ["イーブイ"]),
             ("133", ["イーブイ"]),
+            ("Mr. Mime", ["バリヤード"]),
+            ("mrmime", ["バリヤード"]),
+            ("バリヤード", ["バリヤード"]),
             ("__missing__", []),
             ("", expected_all),
         ):
@@ -166,7 +176,8 @@ def _run(directory):
         ]
         print(
             "probe_real_item_picker_names: OK (real Chromium/WebChannel custom nickname, "
-            "localized species subtitle, English/default form nicknames, and 12 searches)"
+            "localized species subtitle, formatted English/internal species aliases, "
+            "default nicknames, and 16 searches)"
         )
         return True
     finally:

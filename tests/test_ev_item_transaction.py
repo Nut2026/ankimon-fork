@@ -6,6 +6,7 @@ import importlib
 import json
 import sqlite3
 import sys
+import threading
 
 import pytest
 
@@ -310,3 +311,110 @@ def test_real_writer_lock_refuses_before_any_training_or_payment(training_db):
 
     assert _on_disk(db) == original
     _assert_no_leaked_training(db, before, stock)
+
+
+def test_matching_snapshot_allows_preserving_live_battle_hp(training_db):
+    db, before, after = training_db
+    _stock(db, 1)
+    # Combat HP need not have reached disk when the bag is opened. The
+    # concurrency guard compares the persisted snapshot, not the candidate.
+    after["hp"] = after["current_hp"] = 20
+
+    assert (
+        db.consume_item_and_save_main_pokemon(
+            "protein", after, expected_pokemon_data=before
+        )
+        is True
+    )
+
+    assert db.get_main_pokemon() == after
+    assert db.get_item("protein") is None
+    assert not db._get_connection().in_transaction
+
+
+def test_changed_main_snapshot_preserves_rewards_and_all_item_metadata(training_db):
+    db, before, after = training_db
+    _stock(db, 2)
+    stock = db.get_item("protein")
+    rewarded = deepcopy(before)
+    rewarded["ev"]["atk"] = 3
+    rewarded.update(xp=1, friendship=9, pokemon_defeated=1)
+    db.save_main_pokemon(rewarded)
+    original = _on_disk(db)
+
+    assert (
+        db.consume_item_and_save_main_pokemon(
+            "protein", after, expected_pokemon_data=before
+        )
+        is False
+    )
+
+    assert _on_disk(db) == original
+    assert not db._get_connection().in_transaction
+    _assert_no_leaked_training(db, rewarded, stock)
+
+    # A refreshed attempt uses the newly committed rewards as its baseline.
+    refreshed = deepcopy(rewarded)
+    refreshed["ev"]["atk"] += 10
+    assert (
+        db.consume_item_and_save_main_pokemon(
+            "protein", refreshed, expected_pokemon_data=rewarded
+        )
+        is True
+    )
+    assert db.get_main_pokemon() == refreshed
+    assert db.get_item("protein") == dict(stock, quantity=1)
+
+
+def test_reward_committed_during_writer_lock_wait_is_not_overwritten(training_db):
+    db, before, after = training_db
+    _stock(db, 1)
+    stock = db.get_item("protein")
+    rewarded = deepcopy(before)
+    rewarded["ev"]["atk"] = 3
+    rewarded.update(xp=1, friendship=9, pokemon_defeated=1)
+    writer_locked = threading.Event()
+    item_started = threading.Event()
+    errors = []
+
+    def commit_rewards():
+        try:
+            with closing(sqlite3.connect(db.db_path)) as writer:
+                writer.execute("BEGIN IMMEDIATE")
+                writer.execute(
+                    "UPDATE captured_pokemon SET data = ? WHERE individual_id = ?",
+                    (json.dumps(rewarded), "main"),
+                )
+                writer_locked.set()
+                assert item_started.wait(5), "item transaction never started"
+                writer.commit()
+        except BaseException as exc:
+            errors.append(exc)
+
+    # SQLite's trace callback runs before BEGIN tries to acquire the writer
+    # lock, so the worker can commit precisely after the stale payload exists.
+    conn = db._get_connection()
+    conn.set_trace_callback(
+        lambda statement: item_started.set() if statement == "BEGIN IMMEDIATE" else None
+    )
+    thread = threading.Thread(target=commit_rewards)
+    thread.start()
+    try:
+        assert writer_locked.wait(5), "reward worker never acquired its lock"
+        assert (
+            db.consume_item_and_save_main_pokemon(
+                "protein", after, expected_pokemon_data=before
+            )
+            is False
+        )
+    finally:
+        item_started.set()
+        thread.join(5)
+        conn.set_trace_callback(None)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert db.get_main_pokemon() == rewarded
+    assert db.get_item("protein") == stock
+    assert not conn.in_transaction
+    _assert_no_leaked_training(db, rewarded, stock)

@@ -948,8 +948,9 @@ class ItemWindow(QWidget):
     def _use_ev_item(self, item_name: str) -> tuple[bool, int]:
         """Commit one item and its EV gain together, then update live state.
 
-        Preparing a copy validates the effect and recalculates maximum HP
-        without changing the live companion. A failed transaction needs no
+        Serialize with mobile rewards, and verify the persisted snapshot under
+        the writer lock before charging. Preparing a copy recalculates maximum
+        HP without changing the live companion. A failed transaction needs no
         refund and leaves both the save and live combat state untouched.
         Items still cost one unit when the EV caps prevent any gain.
         """
@@ -960,14 +961,43 @@ class ItemWindow(QWidget):
         if item_name not in self.ev_items:
             return False, 0
 
-        try:
-            previous_ev = dict(main.ev)
-            new_ev, granted = apply_ev_item(previous_ev, item_name)
-            candidate = copy.copy(main)
-            candidate.update_stats(ev=new_ev)
-            saved = services.db.consume_item_and_save_main_pokemon(
-                item_name, candidate.to_dict()
+        from ..functions.mobile_sync import _mobile_sync_lock
+
+        # A bulk resolution may own the writer lock for a long time. Refuse
+        # promptly instead of freezing Qt or snapshotting half-published rewards.
+        if not _mobile_sync_lock.acquire(blocking=False):
+            self.logger.log_and_showinfo(
+                "info",
+                "Mobile reviews are being resolved. Please try again when they finish.",
             )
+            return False, 0
+        try:
+            expected = services.db.get_main_pokemon()
+            if not expected or expected.get("individual_id") != main.individual_id:
+                saved = False
+            else:
+                candidate = copy.copy(main)
+                # Preserve the latest saved progress/metadata while retaining
+                # combat HP and status, which may be newer than the saved row.
+                candidate.update_stats(
+                    **{
+                        **expected,
+                        "hp": main.hp,
+                        "current_hp": main.current_hp,
+                        "battle_status": main.battle_status,
+                        "stat_stages": main.stat_stages,
+                        "volatile_status": main.volatile_status,
+                    }
+                )
+                new_ev, granted = apply_ev_item(dict(candidate.ev), item_name)
+                candidate.update_stats(ev=new_ev)
+                candidate_data = candidate.to_dict()
+                pokemon_data = {**expected, **candidate_data}
+                saved = services.db.consume_item_and_save_main_pokemon(
+                    item_name, pokemon_data, expected_pokemon_data=expected
+                )
+                if saved:
+                    main.update_stats(**candidate_data)
         except Exception as exc:
             self.logger.log(
                 "error", f"Could not train {main.name} with {item_name}: {exc}"
@@ -978,6 +1008,8 @@ class ItemWindow(QWidget):
                 "were unchanged; please try again.",
             )
             return False, 0
+        finally:
+            _mobile_sync_lock.release()
         if not saved:
             self.logger.log_and_showinfo(
                 "info",
@@ -986,7 +1018,6 @@ class ItemWindow(QWidget):
             )
             return False, 0
 
-        main.update_stats(ev=new_ev)
         self._refresh_ev_training_state(main, item_name, granted)
         self._refresh_bag()
         try:
@@ -1016,6 +1047,13 @@ class ItemWindow(QWidget):
             sync_active_pokemon_stats(_state.new_state, main)
         except Exception as exc:
             self.logger.log("warning", f"Could not refresh trained battle stats: {exc}")
+        try:
+            if services.reviewer is not None:
+                services.reviewer.refresh_hud()
+        except Exception as exc:
+            self.logger.log(
+                "warning", f"Could not refresh the trained Pokémon HUD: {exc}"
+            )
         try:
             from ..events import events
 

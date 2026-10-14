@@ -13,7 +13,9 @@ loaded in isolation with those stubbed (mirroring
 """
 
 import importlib.util
+import copy
 import sys
+import threading
 import types
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -38,6 +40,10 @@ class _FakeItemDB:
         self.quantity_calls = []
         self.saved_pokemon = []
         self.save_error = None
+        self.main_pokemon = None
+
+    def get_main_pokemon(self):
+        return copy.deepcopy(self.main_pokemon.to_dict())
 
     def get_item(self, item_name):
         if item_name not in self.inventory:
@@ -61,7 +67,9 @@ class _FakeItemDB:
             self.inventory.get(item["item_name"], 0) + count
         )
 
-    def consume_item_and_save_main_pokemon(self, item_name, data):
+    def consume_item_and_save_main_pokemon(
+        self, item_name, data, *, expected_pokemon_data=None
+    ):
         if self.save_error is not None:
             raise self.save_error
         if not self.consume_item(item_name):
@@ -77,6 +85,9 @@ class _FakePokemon:
         self.individual_id = "test-main"
         self.max_hp = self.calculate_max_hp()
         self.hp = self.current_hp = self.max_hp
+        self.battle_status = "fighting"
+        self.stat_stages = {}
+        self.volatile_status = set()
         self.invalidate_cp_cache_calls = 0
 
     def invalidate_cp_cache(self):
@@ -85,8 +96,17 @@ class _FakePokemon:
     def calculate_max_hp(self):
         return 100 + self.ev["hp"] // 4
 
-    def update_stats(self, *, ev):
-        self.ev = ev
+    def update_stats(self, **data):
+        for key in (
+            "ev",
+            "hp",
+            "current_hp",
+            "battle_status",
+            "stat_stages",
+            "volatile_status",
+        ):
+            if key in data:
+                setattr(self, key, data[key])
         self.max_hp = self.calculate_max_hp()
         self.invalidate_cp_cache()
 
@@ -131,6 +151,7 @@ def item_window_mod():
         "Ankimon.functions.badges_functions",
         "Ankimon.functions.pokemon_functions",
         "Ankimon.functions.update_main_pokemon",
+        "Ankimon.functions.mobile_sync",
         "Ankimon.resources",
         "Ankimon.utils",
         "Ankimon.pyobj.item_window",
@@ -154,6 +175,9 @@ def item_window_mod():
             sys.modules[pkg] = mod
         for name in stub_names:
             sys.modules[name] = MagicMock()
+        sys.modules[
+            "Ankimon.functions.mobile_sync"
+        ]._mobile_sync_lock = threading.Lock()
         sys.modules["PyQt6.QtWidgets"].QWidget = _MockQWidget
         services_mod = _force_load("Ankimon.services", _SRC / "Ankimon" / "services.py")
         ev_items_mod = _force_load(
@@ -192,6 +216,7 @@ def _make_window(mod, db, main_pokemon=None):
     win._item_action_in_progress = False
     win._refresh_ev_training_state = MagicMock()
     mod.services.db = db
+    db.main_pokemon = main_pokemon
     mod.save_main_pokemon = MagicMock()
     mod.play_effect_sound = MagicMock()
     return win
