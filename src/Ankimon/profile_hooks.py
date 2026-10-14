@@ -299,7 +299,9 @@ def register_profile_hooks(
         except Exception as e:
             logger.log("error", f"Error updating backup profile path: {e}")
         did_open_handler()
-    backup_handler = backup_manager.on_anki_close
+    def backup_handler():
+        backup_manager.invalidate_context()
+        backup_manager.on_anki_close()
 
     previous_loaded_handler = getattr(services, _PROFILE_LOADED_HANDLER_RECORD, None)
     if previous_loaded_handler is not None and remHook is not None:

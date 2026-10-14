@@ -697,7 +697,11 @@ def test_backup_restore_published_but_unfinished_is_reported_as_pending(transfer
     backup_dir.mkdir()
     _make_save(backup_dir / transfer.active.name, pokemon=11, name="Restored")
     manager = backup_manager.BackupManager(_Logger(), SimpleNamespace(get=lambda *a, **k: None))
-    monkeypatch.setattr(services, "db", SimpleNamespace(db_path=transfer.active))
+    monkeypatch.setattr(services, "db", SimpleNamespace(
+        db_path=transfer.active,
+        identity_token=lambda: (str(transfer.active), 0),
+        run_with_identity=lambda expected, operation: operation(),
+    ))
     warn = MagicMock()
     monkeypatch.setattr(backup_manager, "showWarning", warn)
     # Warnings about an armed restore go through the presenter port.
@@ -769,7 +773,11 @@ def test_backup_restore_over_a_record_for_a_moved_save_names_the_cancel_action(
     backup_dir.mkdir()
     _make_save(backup_dir / transfer.active.name, pokemon=11, name="Restored")
     manager = backup_manager.BackupManager(_Logger(), SimpleNamespace(get=lambda *a, **k: None))
-    monkeypatch.setattr(services, "db", SimpleNamespace(db_path=transfer.active))
+    monkeypatch.setattr(services, "db", SimpleNamespace(
+        db_path=transfer.active,
+        identity_token=lambda: (str(transfer.active), 0),
+        run_with_identity=lambda expected, operation: operation(),
+    ))
     warn = MagicMock()
     monkeypatch.setattr(backup_manager, "showWarning", warn)
     monkeypatch.setattr(services, "ui", SimpleNamespace(warn=warn))
@@ -795,7 +803,11 @@ def test_backup_restore_that_cannot_announce_itself_is_not_called_a_failure(
     backup_dir.mkdir()
     _make_save(backup_dir / transfer.active.name, pokemon=13, name="Restored")
     manager = backup_manager.BackupManager(_Logger(), SimpleNamespace(get=lambda *a, **k: None))
-    monkeypatch.setattr(services, "db", SimpleNamespace(db_path=transfer.active))
+    monkeypatch.setattr(services, "db", SimpleNamespace(
+        db_path=transfer.active,
+        identity_token=lambda: (str(transfer.active), 0),
+        run_with_identity=lambda expected, operation: operation(),
+    ))
     warn = MagicMock()
     monkeypatch.setattr(backup_manager, "showWarning", warn)
     monkeypatch.setattr(backup_manager, "askUser", lambda *a, **k: True)

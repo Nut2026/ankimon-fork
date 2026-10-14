@@ -91,8 +91,7 @@
 
 .backup-card {
     display: grid;
-    grid-template-columns: max-content max-content;
-    justify-content: start;
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 14px 16px;
     align-items: center;
     background: var(--bg-card);
@@ -104,7 +103,7 @@
 
 .backup-details {
     display: grid;
-    grid-template-columns: minmax(135px, .8fr) minmax(200px, 1.2fr);
+    grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr);
     align-items: center;
     gap: 24px;
     min-width: 0;
@@ -114,6 +113,7 @@
     display: grid;
     gap: 10px;
     min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .backup-card:hover {
@@ -141,16 +141,14 @@
 
 .backup-stat {
     display: grid;
-    grid-template-columns: auto auto;
+    grid-template-columns: repeat(2, minmax(0, auto));
     justify-content: start;
     gap: 4px 12px;
-    white-space: nowrap;
 }
 
 .backup-cash {
     color: var(--backup-accent);
     font: 700 1rem 'JetBrains Mono', monospace;
-    white-space: nowrap;
 }
 
 .backup-actions {

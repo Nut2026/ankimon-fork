@@ -176,7 +176,7 @@ def _make_backup_manager(tmp_path, monkeypatch):
     monkeypatch.setattr(bm, "user_files_path", tmp_path)
     monkeypatch.setattr(bm, "backups_path", tmp_path / "backups")
     (tmp_path / "backups").mkdir()
-    monkeypatch.setattr(bm, "_generate_summary", lambda d: {})
+    monkeypatch.setattr(bm, "_generate_summary", lambda d, active_filename=None: {})
     # The real signature. create_backup passes the deadline, so a stub that
     # cannot take it raised, and the retention guard logged that as a failure.
     bm.retention_calls = []

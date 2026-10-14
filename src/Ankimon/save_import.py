@@ -390,7 +390,7 @@ def pending_import_status(target: Path) -> dict:
 @_serialize_staging
 def stage_import(
     snapshot: Path, target: Path, *, sanitize_credentials: bool = True,
-    retain_unverified: bool = False, before_publish=None,
+    retain_unverified: bool = False, before_publish=None, publish_guard=None,
 ) -> dict:
     """Durably retain the chosen save without touching the runtime database.
 
@@ -408,8 +408,10 @@ def stage_import(
     cannot keep a verified copy. It never relaxes the checks on the new save.
 
     ``before_publish`` runs after the private snapshot and manifest are ready,
-    immediately before the manifest commit point. A failed guard leaves nothing
-    staged. The process-wide staging lock serializes this check-and-publish path
+    immediately before each attempt at the manifest commit point. A failed guard
+    leaves nothing staged. ``publish_guard`` may hold a lifecycle barrier around
+    that single rename, but never around a retry delay or snapshot copy.
+    The process-wide staging lock serializes this check-and-publish path
     with other imports, rescues, and cancellations.
 
     Raises ``ImportStagedError`` when publication succeeded but a later step
@@ -454,9 +456,13 @@ def stage_import(
             json.dump(record, handle)
             handle.flush()
             os.fsync(handle.fileno())
-        if before_publish is not None:
-            before_publish()
-        _retry_on_file_lock(lambda: os.replace(temp_manifest, directory / "pending.json"))
+        def publish():
+            if before_publish is not None:
+                before_publish()
+            operation = lambda: os.replace(temp_manifest, directory / "pending.json")
+            return publish_guard(operation) if publish_guard is not None else operation()
+
+        _retry_on_file_lock(publish)
         published = True
     finally:
         if not published:

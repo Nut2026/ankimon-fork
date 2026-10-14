@@ -34,8 +34,7 @@
  *
  *  - It communicates with the Python backend through a QWebChannel bridge
  *    called `backup`. That bridge exposes methods like `getBackups`,
- *    `createBackup`, `restoreBackup`, `deleteBackup`, `openBackupFolder`,
- *    and `restartAnki`.
+ *    `createBackup`, `restoreBackup`, `deleteBackup`, and `openBackupFolder`.
  *
  *  - There's also a `nav` bridge used to wire up the navigation switcher
  *    and to close the window when the close button is clicked.
@@ -58,6 +57,20 @@
 	let actionInProgress = false;
 	let bridgeActionBusy = false;
 	let listRequest = 0;
+	let refreshTimer = null;
+	let renderedSnapshot = null;
+	let modalOpener = null;
+	const pageId = `${Date.now()}-${Math.random()}`;
+
+	window.onBackupsLoaded = (data) => {
+		if (!data || data.request_id !== `${pageId}:${listRequest}` || data.pending === true) return;
+		if (data.retry || data.stale) {
+			clearTimeout(refreshTimer);
+			refreshTimer = setTimeout(refresh, 150);
+			return;
+		}
+		render(data);
+	};
 
 	window.onBackupRestored = (result) => {
 		if (restoreResultHandler) {
@@ -83,6 +96,13 @@
 			return;
 		}
 		const backups = (data && data.backups) || [];
+		const snapshot = JSON.stringify([data.context, backups]);
+		if (modalAction && snapshot === renderedSnapshot) {
+			renderPendingStatus(data.pending);
+			return;
+		}
+		if (modalAction && snapshot !== renderedSnapshot) closeModal();
+		renderedSnapshot = snapshot;
 		contextToken = data.context || null;
 		renderPendingStatus(data.pending);
 		const list = document.getElementById('backup-list');
@@ -157,12 +177,12 @@
 				}
 				openModal(
 					'Prepare Restore',
-					'This prepares the selected backup for the next full Anki restart. Your current save stays active until then. Continue?',
+					`Prepare the backup from ${backup.date} for ${backup.trainer_name || 'Unknown trainer'}? It will replace the active save on the next full Anki restart. Your current save stays active until then.`,
 					() => restoreBackup(backup.path, confirmedContext),
 				);
 			});
 			deleteBtn.addEventListener('click', () => {
-				openModal('Delete Backup', 'Permanently delete this backup folder?', () => deleteBackup(backup.path));
+				openModal('Delete Backup', `Permanently delete the backup from ${backup.date} for ${backup.trainer_name || 'Unknown trainer'}?`, () => deleteBackup(backup.path));
 			});
 			list.appendChild(card);
 		});
@@ -171,10 +191,9 @@
 
 	function refresh() {
 		if (backupBridge) {
-			const request = ++listRequest;
-			backupBridge.getBackups((data) => {
-				if (request === listRequest) render(data);
-			});
+			clearTimeout(refreshTimer);
+			const request = `${pageId}:${++listRequest}`;
+			backupBridge.getBackups(request, window.onBackupsLoaded);
 		} else {
 			renderError('Backup Manager is still connecting to Ankimon.');
 		}
@@ -276,10 +295,8 @@
 	}
 
 	function renderFailure(message, trace) {
+		closeModal();
 		contextToken = null;
-		const status = document.getElementById('backup-status');
-		status.replaceChildren();
-		status.classList.add('hidden');
 		const empty = document.createElement('div');
 		empty.className = 'backup-empty backup-error';
 		const title = document.createElement('strong');
@@ -401,7 +418,9 @@
 	}
 
 	function openModal(title, message, action) {
-		if (actionInProgress || modalAction) return;
+		if (actionInProgress || bridgeActionBusy || modalAction) return;
+		modalOpener = document.activeElement;
+		document.querySelector('.app-container').inert = true;
 		document.getElementById('backup-modal-title').textContent = title;
 		document.getElementById('backup-modal-message').textContent = message;
 		document.getElementById('backup-modal-confirm').textContent = title;
@@ -409,11 +428,14 @@
 		document.querySelector('.backup-modal-card').classList.remove('error');
 		modalAction = action;
 		document.getElementById('backup-modal').classList.remove('hidden');
-		document.getElementById('backup-modal-confirm').focus();
+		document.getElementById('backup-modal-cancel').focus();
 	}
 
 	window.showBackupNotice = (message, isError) => {
+		closeModal();
 		refresh();
+		modalOpener = document.activeElement;
+		document.querySelector('.app-container').inert = true;
 		document.getElementById('backup-modal-title').textContent =
 			isError ? 'Save Import Could Not Be Cancelled' : 'Save Import Status';
 		document.getElementById('backup-modal-message').textContent = message;
@@ -427,12 +449,23 @@
 
 	function closeModal() {
 		modalAction = null;
+		document.querySelector('.app-container').inert = false;
 		document.getElementById('backup-modal').classList.add('hidden');
 		document.getElementById('backup-modal-cancel').classList.remove('hidden');
 		document.querySelector('.backup-modal-card').classList.remove('error');
+		if (modalOpener && modalOpener.isConnected) modalOpener.focus();
+		modalOpener = null;
 	}
 
+	window.retireBackupConfirmation = () => {
+		closeModal();
+		contextToken = null;
+		++listRequest;
+		clearTimeout(refreshTimer);
+	};
+
 	window.initializeBackupManager = render;
+	window.refreshBackups = refresh;
 	document.addEventListener('DOMContentLoaded', () => {
 		document.getElementById('manual-backup-btn').addEventListener('click', createBackup);
 		document.getElementById('open-folder-btn').addEventListener('click', () => {
@@ -447,10 +480,7 @@
 					completed = true;
 					finishAction();
 					if (!result || result.ok === false) {
-						renderFailure(
-							(result && result.error) || 'Could not open the Ankimon_Backups folder.',
-							result && result.traceback,
-						);
+						console.error(result && (result.traceback || result.error));
 						showToast((result && result.error) || 'Could not open the backup folder.', true);
 					}
 				};
@@ -471,7 +501,18 @@
 			if (event.target.id === 'backup-modal') closeModal();
 		});
 		document.addEventListener('keydown', (event) => {
-			if (event.key === 'Escape') closeModal();
+			const modal = document.getElementById('backup-modal');
+			if (modal.classList.contains('hidden')) return;
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				closeModal();
+			} else if (event.key === 'Tab') {
+				const buttons = [...modal.querySelectorAll('button')].filter((button) => !button.classList.contains('hidden'));
+				const index = buttons.indexOf(document.activeElement);
+				const next = (index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length;
+				event.preventDefault();
+				buttons[next].focus();
+			}
 		});
 		document.getElementById('close-btn').addEventListener('click', () => {
 			if (window.navBridge) window.navBridge.closeWindow();
@@ -483,9 +524,11 @@
 			refresh();
 		});
 	});
+	window.addEventListener('pagehide', window.retireBackupConfirmation);
 	window.addEventListener('focus', refresh);
 	window.addEventListener('pageshow', refresh);
 	document.addEventListener('visibilitychange', () => {
-		if (!document.hidden) refresh();
+		if (document.hidden) window.retireBackupConfirmation();
+		else refresh();
 	});
 })();

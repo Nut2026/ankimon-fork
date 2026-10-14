@@ -2320,3 +2320,164 @@ def test_partial_link_publication_keeps_original_listable_and_restorable(
     assert {row["path"] for row in bm.get_backups()} == {
         str(bm.backups_path / name) for name in (alias.name, original.name)
     }
+
+
+@pytest.mark.parametrize('operation', ['create', 'restore'])
+@pytest.mark.parametrize('change', ['account_aba', 'profile_close', 'database_object'])
+def test_confirmed_backup_context_rejects_changes_before_dispatch(mock_env, operation, change):
+    bm, db, user_files, _ = mock_env
+    selected = bm.backups_path / 'backup_confirmed'
+    selected.mkdir()
+    _seed_db(selected / 'ankimon.db', 'Confirmed normal', 100)
+    _seed_db(selected / 'ankimonDEV.db', 'Unconfirmed developer', 200)
+    context = bm.capture_context()
+    replacement = None
+    try:
+        if change == 'account_aba':
+            assert db.switch_database('ankimonDEV.db')
+            assert db.switch_database('ankimon.db')
+        elif change == 'profile_close':
+            bm.invalidate_context()
+            bm.refresh_profile_path()
+        else:
+            replacement = AnkimonDB(MockLogger(), db_path=db.db_path)
+            services.db = replacement
+        if operation == 'create':
+            with pytest.raises(RuntimeError, match='changed'):
+                bm.create_backup(manual=True, show_notifications=False, context=context)
+        else:
+            result = bm.restore_backup(str(selected), interactive=False, context=context)
+            assert result['status'] == 'failed'
+            assert 'changed' in result['error']
+        assert not list(user_files.glob('.ankimon-import-*/pending.json'))
+        assert list(bm.backups_path.glob('backup_*')) == [selected]
+    finally:
+        services.db = db
+        if replacement:
+            replacement.close()
+
+
+@pytest.mark.parametrize('operation', ['create', 'restore'])
+def test_context_change_during_publication_retry_never_arms_or_publishes(mock_env, monkeypatch, operation):
+    import Ankimon.save_import as save_import
+
+    monkeypatch.setattr(save_import, '_is_file_lock_error', lambda error: isinstance(error, PermissionError))
+    bm, db, user_files, _ = mock_env
+    selected = bm.backups_path / 'backup_confirmed'
+    selected.mkdir()
+    _seed_db(selected / 'ankimon.db', 'Confirmed normal', 100)
+    context = bm.capture_context()
+    rename, replace = Path.rename, os.replace
+    attempts = []
+
+    def locked_once(source, destination):
+        # Cause exactly the final publication to fail once. During the retry
+        # delay, simulate the user switching away and back to the same path.
+        if ((operation == 'create' and Path(source).name.startswith('.backup_'))
+                or (operation == 'restore' and Path(destination).name == 'pending.json')):
+            attempts.append(str(destination))
+            assert db.switch_database('ankimonDEV.db')
+            assert db.switch_database('ankimon.db')
+            raise PermissionError(13, 'scanner still has publication open')
+        return (rename if operation == 'create' else replace)(source, destination)
+
+    monkeypatch.setattr(Path if operation == 'create' else os,
+                        'rename' if operation == 'create' else 'replace', locked_once)
+    if operation == 'create':
+        assert not bm.create_backup(manual=True, show_notifications=False, context=context)
+    else:
+        result = bm.restore_backup(str(selected), interactive=False, context=context)
+        assert result['status'] == 'failed', result
+        assert 'changed' in result['error']
+    assert len(attempts) == 1
+    assert not list(user_files.glob('.ankimon-import-*/pending.json'))
+    assert list(bm.backups_path.glob('backup_*')) == [selected]
+
+
+def test_custom_filename_is_listed_and_restorable(mock_env, tmp_path):
+    from Ankimon.save_import import cancel_pending_import, pending_import_info
+
+    bm, db, _, _ = mock_env
+    custom = AnkimonDB(MockLogger(), db_path=tmp_path / 'profile-save.db')
+    try:
+        services.db = custom
+        custom.set_config_value('trainer.name', 'Custom snapshot')
+        assert bm.create_backup(manual=True, show_notifications=False, context=bm.capture_context())
+        [row] = bm.get_backups(include_inactive=True)
+        assert row['trainer_name'] == 'Custom snapshot'
+        custom.set_config_value('trainer.name', 'Current progress')
+        result = bm.restore_backup(row['path'], interactive=False, context=bm.capture_context())
+        assert result['status'] == 'staged', result
+        assert Path(result['pending_target']) == custom.db_path
+        pending = pending_import_info(custom.db_path)
+        with closing(sqlite3.connect(pending['pending_path'])) as staged:
+            assert staged.execute("SELECT value FROM config WHERE key='trainer.name'").fetchone() == ('Custom snapshot',)
+        assert custom.get_config_value('trainer.name') == 'Current progress'
+    finally:
+        cancel_pending_import(custom.db_path)
+        custom.close()
+        services.db = db
+
+
+@pytest.mark.parametrize('filename', ['ankimon.db', 'ankimonDEV.db', 'profile-save.db'])
+def test_incomplete_linked_migration_keeps_usable_original_listed(mock_env, tmp_path, filename):
+    bm, db, _, addon_dir = mock_env
+    linked = tmp_path / 'linked-legacy'
+    linked.mkdir()
+    legacy = addon_dir.parent / 'ankimon_backups'
+    legacy.mkdir()
+    original = linked / 'backup_original'
+    original.mkdir()
+    _seed_db(original / filename, 'Usable original', 120)
+    target = bm.backups_path / original.name
+    target.mkdir()  # An interrupted copy, with no requested database.
+    selected = legacy / original.name
+    selected.symlink_to(original, target_is_directory=True)
+    (original / 'summary.json').write_text('{}')
+    bm._migrated_paths[selected] = target
+    BackupManager._write_migration_record(bm.backups_path, {
+        'source': str(legacy.resolve()), 'entries': {original.name: target.name}, 'digests': {},
+    })
+    active = AnkimonDB(MockLogger(), db_path=tmp_path / filename)
+    try:
+        services.db = active
+        for include_inactive in (False, True):
+            rows = bm.get_backups(include_inactive=include_inactive)
+            assert str(selected) in {row['path'] for row in rows}
+        assert bm._resolve_backup_path(selected) == selected
+        assert bm._resolve_backup_path(selected, filename) == selected
+    finally:
+        active.close()
+        services.db = db
+
+
+@pytest.mark.parametrize('operation', ['create', 'restore'])
+def test_account_change_during_copy_cannot_publish_wrong_save(mock_env, monkeypatch, operation):
+    bm, db, user_files, _ = mock_env
+    selected = bm.backups_path / 'backup_confirmed'
+    selected.mkdir()
+    _seed_db(selected / 'ankimon.db', 'Selected normal', 100)
+    _seed_db(selected / 'ankimonDEV.db', 'Unselected developer', 200)
+    context = bm.capture_context()
+    copied = []
+    original = bm._snapshot_database if operation == 'create' else bm._copy_restore_source
+
+    def copy_while_switched(source, destination, *args, **kwargs):
+        assert db.switch_database('ankimonDEV.db')
+        try:
+            copied.append(Path(source))
+            return original(source, destination, *args, **kwargs)
+        finally:
+            assert db.switch_database('ankimon.db')
+
+    monkeypatch.setattr(bm, '_snapshot_database' if operation == 'create' else '_copy_restore_source', copy_while_switched)
+    if operation == 'create':
+        assert not bm.create_backup(manual=True, show_notifications=False, context=context)
+        assert copied == [context.target]
+    else:
+        result = bm.restore_backup(str(selected), interactive=False, context=context)
+        assert result['status'] == 'failed', result
+        assert 'changed' in result['error']
+        assert copied == [selected / 'ankimon.db']
+    assert not list(user_files.glob('.ankimon-import-*/pending.json'))
+    assert list(bm.backups_path.glob('backup_*')) == [selected]
