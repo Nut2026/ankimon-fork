@@ -310,6 +310,58 @@ def test_species_without_an_item_evolution_is_not_offered(shop_obj):
     assert "e" not in choices[pikachu["individual_id"]]
 
 
+@pytest.mark.parametrize("language,species_name", [(9, "Pikachu"), (1, "ピカチュウ")])
+def test_custom_nickname_keeps_a_separate_searchable_species(
+    shop_obj, language, species_name
+):
+    mon = _pokemon("pikachu", 25)
+    mon["nickname"] = "  Sparky  "
+    stub_services = _stub_services([mon])
+    stub_services.settings = types.SimpleNamespace(
+        get=lambda key, default=None: language if key == "misc.language" else default
+    )
+    with patch.object(shop_obj, "services", stub_services):
+        choice = shop_obj.AnkimonItemsWeb.get_pokemon_choices(_StubHost())["choices"][0]
+
+    assert choice["n"] == species_name
+    assert choice["nk"] == "Sparky"
+    if language == 1:
+        assert choice["a"] == "pikachu"
+    else:
+        assert "a" not in choice
+
+
+@pytest.mark.parametrize("nickname", ["", "PIKACHU", "ピカチュウ"])
+def test_default_nicknames_do_not_override_localized_species(shop_obj, nickname):
+    mon = _pokemon("pikachu", 25)
+    mon["nickname"] = nickname
+    stub_services = _stub_services([mon])
+    stub_services.settings = types.SimpleNamespace(
+        get=lambda key, default=None: 1 if key == "misc.language" else default
+    )
+    with patch.object(shop_obj, "services", stub_services):
+        choice = shop_obj.AnkimonItemsWeb.get_pokemon_choices(_StubHost())["choices"][0]
+
+    assert choice["n"] == "ピカチュウ"
+    assert choice["a"] == "pikachu"
+    assert "nk" not in choice
+
+
+def test_default_english_form_nickname_keeps_localized_species(shop_obj):
+    mon = _pokemon("wooperpaldea", 10253)
+    mon["nickname"] = "Paldean Wooper"
+    stub_services = _stub_services([mon])
+    stub_services.settings = types.SimpleNamespace(
+        get=lambda key, default=None: 1 if key == "misc.language" else default
+    )
+    with patch.object(shop_obj, "services", stub_services):
+        choice = shop_obj.AnkimonItemsWeb.get_pokemon_choices(_StubHost())["choices"][0]
+
+    assert choice["n"] == "パルデアウパー"
+    assert choice["a"] == "wooperpaldea"
+    assert "nk" not in choice
+
+
 @pytest.mark.parametrize("prevo_name,prevo_id,item_identifier", TRADE_ITEM_SPECIES)
 def test_picker_agrees_with_canonical_helper(
     shop_obj, prevo_name, prevo_id, item_identifier

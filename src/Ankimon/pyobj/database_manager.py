@@ -1880,6 +1880,82 @@ class AnkimonDB:
             )
         return consumed
 
+    def consume_item_and_save_main_pokemon(
+        self, item_name: str, pokemon_data: Dict[str, Any]
+    ) -> bool:
+        """Spend one item and update the existing main Pokemon atomically.
+
+        This operation owns its transaction: it refuses a caller's pending
+        transaction or bulk-commit scope rather than committing unrelated work
+        or reporting success before the item and Pokemon are durable. It only
+        updates data for the still-current individual, so a stale item window
+        cannot recreate a deleted Pokemon or switch the main selection.
+        """
+        if not isinstance(item_name, str) or not item_name:
+            return False
+        if not isinstance(pokemon_data, dict):
+            return False
+        individual_id = pokemon_data.get("individual_id")
+        if not isinstance(individual_id, str) or not individual_id:
+            return False
+        # Serialization can fail; do it before acquiring a lock or charging.
+        obfuscated_data = self._obfuscate(pokemon_data)
+
+        with self.lease_connection() as conn:
+            if conn.in_transaction or conn._disable_commit:
+                self._log(
+                    "warning",
+                    "Cannot use an item inside an existing database transaction.",
+                )
+                return False
+            began_transaction = False
+            try:
+                with conn.cursor() as cursor:
+                    # Keep main selection and stock fixed until the one commit.
+                    # Raw cursor statements cannot auto-retry on a different
+                    # connection halfway through this transaction.
+                    cursor.execute("BEGIN IMMEDIATE")
+                    began_transaction = True
+                    cursor.execute(
+                        "SELECT 1 FROM captured_pokemon "
+                        "WHERE individual_id = ? AND is_main = 1",
+                        (individual_id,),
+                    )
+                    if cursor.fetchone() is None:
+                        conn.rollback()
+                        return False
+                    cursor.execute(
+                        "UPDATE items SET quantity = quantity - 1 "
+                        "WHERE item_name = ? AND quantity >= 1",
+                        (item_name,),
+                    )
+                    if cursor.rowcount != 1:
+                        conn.rollback()
+                        return False
+                    cursor.execute(
+                        "DELETE FROM items WHERE item_name = ? AND quantity = 0",
+                        (item_name,),
+                    )
+                    cursor.execute(
+                        "UPDATE captured_pokemon SET data = ? "
+                        "WHERE individual_id = ? AND is_main = 1",
+                        (obfuscated_data, individual_id),
+                    )
+                    if cursor.rowcount != 1:
+                        conn.rollback()
+                        return False
+                    conn.commit()
+            except Exception:
+                if began_transaction:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        # Closing SQLite also discards a failed transaction.
+                        # Our lease defers the close until this operation exits.
+                        conn.close()
+                raise
+        return True
+
     def refund_item(self, item: Dict[str, Any], count: int = 1) -> None:
         """Return spent units, retaining metadata if consumption deleted the row.
 
@@ -2089,8 +2165,7 @@ class AnkimonDB:
             )
             if cursor.fetchone() is None:
                 raise ValueError(
-                    "You cannot reject your last Pokémon. "
-                    "Catch another Pokémon first."
+                    "You cannot reject your last Pokémon. Catch another Pokémon first."
                 )
             cursor.execute(
                 "DELETE FROM captured_pokemon WHERE individual_id = ?",
@@ -2106,9 +2181,7 @@ class AnkimonDB:
             )
             self._write_monthly_challenge_state(cursor, individual_id, 2)
 
-            cursor.execute(
-                "SELECT 1 FROM captured_pokemon WHERE is_main = 1 LIMIT 1"
-            )
+            cursor.execute("SELECT 1 FROM captured_pokemon WHERE is_main = 1 LIMIT 1")
             if cursor.fetchone() is None:
                 cursor.execute(
                     """
