@@ -399,9 +399,7 @@ class Reviewer_Manager:
             hud_html += '<div id="life-bar" class="Ankimon"></div>'
         if self.settings.get("gui.hud_xp_bar"):
             hud_html += (
-                '<div id="xp-bar" class="Ankimon">'
-                '<div id="xp-bar-fill"></div>'
-                "</div>"
+                '<div id="xp-bar" class="Ankimon"><div id="xp-bar-fill"></div></div>'
             )
             hud_html += '<div id="xp_text" class="Ankimon">XP</div>'
 

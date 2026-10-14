@@ -5,6 +5,7 @@ Optional screenshot directory: ANKIMON_PROOF_SCREENSHOTS=/tmp/pr838-screenshots
 """
 
 from contextlib import nullcontext
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -33,6 +34,14 @@ def run_proof():
 
 def _run(directory):
     """Exercise purchases and item evolutions against real Qt, Chromium and SQLite."""
+    from harness import clock
+
+    # Daily stock is date-seeded and its pool changes as items are added. This
+    # proof needs to buy a specific item, so seed its real SQLite shop fixture
+    # under a fixed calendar before opening any shop screen (also avoids a
+    # midnight rollover invalidating that fixture during the confirmations).
+    clock.install_clock(datetime(2026, 10, 14, 12, 0))
+
     from PyQt6.QtCore import Qt
     from PyQt6.QtGui import QPixmap
     from PyQt6.QtTest import QTest
@@ -57,6 +66,16 @@ def _run(directory):
     from Ankimon.ankimon_items_web.shop_obj import SCREEN_ITEMS
 
     db = d.services.db
+    cord_price = utils.get_item_price("linking-cord")
+    assert cord_price and cord_price > 0, "The Linking Cord lost its real shop price"
+    db.set_user_data(
+        "todays_shop",
+        {
+            "date": clock.now().strftime("%Y-%m-%d"),
+            "items": [{"name": "linking-cord", "price": cord_price}],
+            "technical_machines": [],
+        },
+    )
     utils.items_path.mkdir(parents=True, exist_ok=True)
     assert not (utils.items_path / "linking-cord.png").exists()
     assert not QPixmap(str(utils.get_item_sprite_path("linking-cord"))).isNull()
@@ -119,7 +138,7 @@ def _run(directory):
     click('[data-item-name="linking-cord"]')
     click(".det-action-btn.buy")
     assert _wait_until(lambda: db.get_item("linking-cord")["quantity"] == 13)
-    assert d.services.settings.get("trainer.cash") == 12000
+    assert d.services.settings.get("trainer.cash") == 20000 - cord_price
     screenshot("linking-cord-shop")
 
     def open_picker(item):
