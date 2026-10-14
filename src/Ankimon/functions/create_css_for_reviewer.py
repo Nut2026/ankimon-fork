@@ -419,28 +419,42 @@ def create_css_for_reviewer(
         # out of the HUD, so render an empty bar (issue #101).
         _exp_next = int(experience_for_next_lvl or 0)
         xp_bar_percent = (
-            int((int(main_pokemon.xp or 0) / _exp_next) * 100) if _exp_next else 0
+            min(100, max(0, int((int(main_pokemon.xp or 0) / _exp_next) * 100)))
+            if _exp_next
+            else 0
+        )
+        xp_text_alignment = (
+            "translateY(-50%)" if xp_bar_location == "top" else "translateY(50%)"
         )
         css += f"""
-/* XP bar - matte, outlined, no glow */
+/* XP track and fill - matte, outlined, no glow */
 #ankimon-hud #xp-bar {{
   position: fixed;
   {xp_bar_location}: 7px;
   left: 50px;
-  right: 5px;
+  right: 25px;
   z-index: 9999;
-  width: {xp_bar_percent}%;
   height: 10px;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1.5px solid var(--ankimon-outline);
   border-radius: 5px;
-  background: rgba(0, 191, 255, 0.85);
+  background: rgba(0, 191, 255, 0.2);
   box-shadow: none !important;
   filter: none !important;
-  outline: 1.5px solid var(--ankimon-outline);
+}}
+
+#ankimon-hud #xp-bar-fill {{
+  width: {xp_bar_percent}%;
+  height: 100%;
+  border-radius: inherit;
+  background: rgba(0, 191, 255, 0.85);
 }}
 
 #ankimon-hud #xp_text {{
   position: fixed;
-  {xp_bar_location}: 2px;
+  {xp_bar_location}: 12px;
+  transform: {xp_text_alignment};
   left: 15px;
   z-index: 9999;
   color: rgba(0, 191, 255, 0.85);
