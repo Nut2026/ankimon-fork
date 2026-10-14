@@ -21,24 +21,28 @@ from datetime import datetime
 import requests
 from aqt import QDialog, QVBoxLayout, QWebEngineView, QWebEnginePage, mw
 from aqt.qt import Qt, QUrl, QFrame, QWebEngineProfile
+
 try:
     from aqt.operations import QueryOp
 except ImportError:
+
     class QueryOp:
         def __init__(self, parent=None, op=None, success=None):
             self.parent = parent
             self.op = op
             self.success = success
-        
+
         def without_collection(self):
             return self
-        
+
         def run_in_background(self):
             if self.op:
                 result = self.op(None)
                 if self.success:
                     self.success(result)
             return self
+
+
 from PyQt6.QtCore import QObject, pyqtSlot, QTimer, QByteArray, QVariant
 from PyQt6.QtGui import QColor, QDesktopServices, QIcon
 from PyQt6.QtWebChannel import QWebChannel
@@ -55,7 +59,12 @@ except ImportError:  # dev helper not landed yet (thread-reload-and-misc-utils u
         return False
 
 
-from ..resources import items_path, csv_file_items_cost, csv_file_descriptions, icon_path
+from ..resources import (
+    items_path,
+    csv_file_items_cost,
+    csv_file_descriptions,
+    icon_path,
+)
 
 
 class SafeWebEnginePage(QWebEnginePage):
@@ -191,7 +200,7 @@ class NavBridge(QObject):
     @pyqtSlot()
     def openHistory(self):
         self._w.load_screen(SCREEN_HISTORY)
-    
+
     @pyqtSlot()
     def openBackupManager(self):
         self._w.load_screen(SCREEN_BACKUP)
@@ -390,6 +399,7 @@ class MobileBridge(QObject):
             # narration can localize itself; mirrors move_names._current_lang_code.
             try:
                 from ..move_names import _current_lang_code
+
                 mobile_language = _current_lang_code()
             except Exception:
                 mobile_language = "en"
@@ -422,7 +432,12 @@ class MobileBridge(QObject):
             battle_count = resolved_battles + math.ceil(pending_count / cards_per_round)
 
             if pending_count == 0:
-                return {"pending_count": 0, "cap": 10000, "battle_count": 0, "language": mobile_language}
+                return {
+                    "pending_count": 0,
+                    "cap": 10000,
+                    "battle_count": 0,
+                    "language": mobile_language,
+                }
 
             # Populate ease breakdown from rows count
             ease_breakdown = {"1": 0, "2": 0, "3": 0, "4": 0}
@@ -1082,6 +1097,7 @@ class MobileBridge(QObject):
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+
 class BackupBridge(QObject):
     """Backup-manager actions exposed to the Web UI."""
 
@@ -1121,11 +1137,14 @@ class BackupBridge(QObject):
             "profile_folder": str(manager._active_profile_folder() or ""),
             "database": str(getattr(db, "db_path", "") or ""),
             "account": str(settings.get("leaderboard.username", "") or "")
-            if settings is not None else "",
+            if settings is not None
+            else "",
             "trainer_id": str(settings.get("trainer.id", "") or "")
-            if settings is not None else "",
+            if settings is not None
+            else "",
             "trainer_name": str(settings.get("trainer.name", "") or "")
-            if settings is not None else "",
+            if settings is not None
+            else "",
         }
         payload = json.dumps(context, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -1163,7 +1182,8 @@ class BackupBridge(QObject):
             manager = getattr(self._w, "backup_manager", None)
             if manager is not None:
                 manager.logger.log(
-                    "error", f"Could not deliver Backup Manager action result: {error}",
+                    "error",
+                    f"Could not deliver Backup Manager action result: {error}",
                 )
 
     def _permitted_backup_paths(self, manager):
@@ -1233,7 +1253,8 @@ class BackupBridge(QObject):
                         f"Could not determine pending save import status: {status_error}",
                     )
                     pending_status = {
-                        "state": "unknown", "error": str(status_error),
+                        "state": "unknown",
+                        "error": str(status_error),
                     }
                 status = pending_status["state"]
                 if status != "none":
@@ -1270,9 +1291,11 @@ class BackupBridge(QObject):
                         pending["message"] += f" Details: {pending_status['error']}"
             return {
                 "backups": worker_manager.get_backups(
-                    include_inactive=True, active_filename=context.target.name,
+                    include_inactive=True,
+                    active_filename=context.target.name,
                 ),
-                "path": str(context.backups_path), "context": token,
+                "path": str(context.backups_path),
+                "context": token,
                 "pending": pending,
             }
 
@@ -1290,7 +1313,8 @@ class BackupBridge(QObject):
             try:
                 self._w.webview_backup.page().runJavaScript(
                     "if (window.onBackupsLoaded) window.onBackupsLoaded("
-                    + json.dumps(result) + ");"
+                    + json.dumps(result)
+                    + ");"
                 )
             except Exception as error:
                 manager.logger.log("error", f"Could not deliver backup status: {error}")
@@ -1300,6 +1324,7 @@ class BackupBridge(QObject):
 
         try:
             from aqt.operations import QueryOp
+
             QueryOp(parent=self._w, op=read_status, success=deliver).failure(
                 failed,
             ).without_collection().run_in_background()
@@ -1329,7 +1354,10 @@ class BackupBridge(QObject):
         except Exception as error:
             return {"ok": False, "error": str(error)}
         if not self._begin_action():
-            return {"ok": False, "error": "Another backup action is already in progress."}
+            return {
+                "ok": False,
+                "error": "Another backup action is already in progress.",
+            }
         context_changed = [False]
 
         def run_backup(_col):
@@ -1345,7 +1373,9 @@ class BackupBridge(QObject):
 
             validate_context()
             return manager.create_backup(
-                manual=True, show_notifications=False, before_publish=validate_context,
+                manual=True,
+                show_notifications=False,
+                before_publish=validate_context,
                 context=context,
             )
 
@@ -1365,7 +1395,8 @@ class BackupBridge(QObject):
                     "The confirmed account or Anki profile changed before the "
                     "backup could be published. No backup was created."
                     if context_changed[0]
-                    else getattr(manager, "last_error", None) or "Could not create backup."
+                    else getattr(manager, "last_error", None)
+                    or "Could not create backup."
                 )
                 tb = getattr(manager, "last_traceback", None)
                 if tb:
@@ -1382,11 +1413,16 @@ class BackupBridge(QObject):
                 "error": (
                     "The confirmed account or Anki profile changed before the "
                     "backup could be published. No backup was created."
-                    if context_changed[0] else "Could not create backup."
+                    if context_changed[0]
+                    else "Could not create backup."
                 ),
-                "traceback": "".join(traceback.format_exception(
-                    type(exception), exception, exception.__traceback__,
-                )),
+                "traceback": "".join(
+                    traceback.format_exception(
+                        type(exception),
+                        exception,
+                        exception.__traceback__,
+                    )
+                ),
             }
             if notify:
                 self._deliver_action_result("onBackupCreated", result, finished)
@@ -1440,7 +1476,10 @@ class BackupBridge(QObject):
 
         manager = self._manager()
         if not self._begin_action():
-            return {"ok": False, "error": "Another backup action is already in progress."}
+            return {
+                "ok": False,
+                "error": "Another backup action is already in progress.",
+            }
 
         def deliver_result(result):
             self._deliver_action_result("onBackupRestored", result, finished)
@@ -1450,9 +1489,11 @@ class BackupBridge(QObject):
         def launch_restore(confirm_unverified=False):
             def run_restore(_col):
                 restored = manager.restore_backup(
-                    str(resolved), interactive=False,
+                    str(resolved),
+                    interactive=False,
                     confirm_unverified=confirm_unverified,
-                    context=context, source_file=source_file,
+                    context=context,
+                    source_file=source_file,
                 )
 
                 if isinstance(restored, dict) and restored.get("status") == "staged":
@@ -1475,7 +1516,8 @@ class BackupBridge(QObject):
                             from ..save_import import set_pending_import_warning
 
                             if not set_pending_import_warning(
-                                Path(restored["pending_target"]), "\n\n".join(warnings),
+                                Path(restored["pending_target"]),
+                                "\n\n".join(warnings),
                                 expected_token=pending_token,
                             ):
                                 manager.logger.log(
@@ -1502,39 +1544,47 @@ class BackupBridge(QObject):
                     }
                 elif restored.get("status") == "confirmation_required":
                     if not self._context_matches(expected_context):
-                        deliver_result({
-                            "ok": False,
-                            "error": (
-                                "The confirmed account or Anki profile changed before "
-                                "damaged-save confirmation. Nothing was prepared."
-                            ),
-                        })
+                        deliver_result(
+                            {
+                                "ok": False,
+                                "error": (
+                                    "The confirmed account or Anki profile changed before "
+                                    "damaged-save confirmation. Nothing was prepared."
+                                ),
+                            }
+                        )
                         return
                     try:
                         from aqt.utils import askUser
 
                         confirmed = askUser(restored["message"], defaultno=True)
                     except Exception as error:
-                        deliver_result({
-                            "ok": False,
-                            "error": f"Could not confirm backup restore: {error}",
-                        })
+                        deliver_result(
+                            {
+                                "ok": False,
+                                "error": f"Could not confirm backup restore: {error}",
+                            }
+                        )
                         return
                     if not confirmed:
-                        deliver_result({
-                            "ok": False,
-                            "cancelled": True,
-                            "error": "Backup restoration cancelled.",
-                        })
+                        deliver_result(
+                            {
+                                "ok": False,
+                                "cancelled": True,
+                                "error": "Backup restoration cancelled.",
+                            }
+                        )
                         return
                     if not self._context_matches(expected_context):
-                        deliver_result({
-                            "ok": False,
-                            "error": (
-                                "The confirmed account or Anki profile changed during "
-                                "damaged-save confirmation. Nothing was prepared."
-                            ),
-                        })
+                        deliver_result(
+                            {
+                                "ok": False,
+                                "error": (
+                                    "The confirmed account or Anki profile changed during "
+                                    "damaged-save confirmation. Nothing was prepared."
+                                ),
+                            }
+                        )
                         return
                     launch_restore(confirm_unverified=True)
                     return
@@ -1543,11 +1593,13 @@ class BackupBridge(QObject):
                         "ok": True,
                         "pending_restart": True,
                     }
-                    result.update({
-                        "pending_token": restored.get("pending_token"),
-                        "pending_target": Path(restored["pending_target"]).name,
-                        "warning": restored.get("warning", ""),
-                    })
+                    result.update(
+                        {
+                            "pending_token": restored.get("pending_token"),
+                            "pending_target": Path(restored["pending_target"]).name,
+                            "warning": restored.get("warning", ""),
+                        }
+                    )
                 else:
                     result = {
                         "ok": False,
@@ -1556,13 +1608,19 @@ class BackupBridge(QObject):
                 deliver_result(result)
 
             def on_error(exception):
-                deliver_result({
-                    "ok": False,
-                    "error": str(exception),
-                    "traceback": "".join(traceback.format_exception(
-                        type(exception), exception, exception.__traceback__,
-                    )),
-                })
+                deliver_result(
+                    {
+                        "ok": False,
+                        "error": str(exception),
+                        "traceback": "".join(
+                            traceback.format_exception(
+                                type(exception),
+                                exception,
+                                exception.__traceback__,
+                            )
+                        ),
+                    }
+                )
 
             if QueryOp is None:
                 try:
@@ -1596,7 +1654,10 @@ class BackupBridge(QObject):
     @pyqtSlot(str, result="QVariant")
     def deleteBackup(self, backup_path):
         if not self._begin_action():
-            return {"ok": False, "error": "Another backup action is already in progress."}
+            return {
+                "ok": False,
+                "error": "Another backup action is already in progress.",
+            }
         try:
             resolved = self._validate_backup_path(backup_path)
         except ValueError as error:
@@ -1604,17 +1665,25 @@ class BackupBridge(QObject):
             return {"ok": False, "error": str(error)}
         try:
             return self._w.backup_manager.delete_backup(
-                str(resolved), interactive=False,
+                str(resolved),
+                interactive=False,
             )
         except Exception as error:
-            return {"ok": False, "error": str(error), "traceback": traceback.format_exc()}
+            return {
+                "ok": False,
+                "error": str(error),
+                "traceback": traceback.format_exc(),
+            }
         finally:
             self._end_action()
 
     @pyqtSlot(result="QVariant")
     def openBackupFolder(self):
         if not self._begin_action():
-            return {"ok": False, "error": "Another backup action is already in progress."}
+            return {
+                "ok": False,
+                "error": "Another backup action is already in progress.",
+            }
         try:
             manager = self._w.backup_manager
             manager.refresh_profile_path()
@@ -1627,11 +1696,19 @@ class BackupBridge(QObject):
                 os.startfile(str(path))
                 return {"ok": True}
             opened = bool(QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))))
-            return {"ok": opened, "error": None if opened else "Qt could not open the backup path."}
+            return {
+                "ok": opened,
+                "error": None if opened else "Qt could not open the backup path.",
+            }
         except Exception as error:
-            return {"ok": False, "error": str(error), "traceback": traceback.format_exc()}
+            return {
+                "ok": False,
+                "error": str(error),
+                "traceback": traceback.format_exc(),
+            }
         finally:
             self._end_action()
+
 
 class AnkimonItemsWeb(QDialog):
     def __init__(
@@ -1765,9 +1842,7 @@ class AnkimonItemsWeb(QDialog):
 
         self.webview_backup = QWebEngineView()
         self.webview_backup.setPage(
-            SafeWebEnginePage(
-                self.profile, SCREEN_BACKUP, logger, self.webview_backup
-            )
+            SafeWebEnginePage(self.profile, SCREEN_BACKUP, logger, self.webview_backup)
         )
         self._views = {
             SCREEN_ITEMS: self.webview_items,
@@ -1870,7 +1945,12 @@ class AnkimonItemsWeb(QDialog):
             elif screen == SCREEN_BACKUP:
                 title = "Ankimon — Backup Manager"
                 target_view = self.webview_backup
-                path = self.addon_dir / "ankimon_manager_web" / "backup_manager" / "backup_manager.html"
+                path = (
+                    self.addon_dir
+                    / "ankimon_manager_web"
+                    / "backup_manager"
+                    / "backup_manager.html"
+                )
             else:
                 return
 
@@ -2240,7 +2320,10 @@ class AnkimonItemsWeb(QDialog):
                     pid_val = int(pid)
                     if pid_val not in encounter_data.UNAVAILABLE:
                         results.append(
-                            {"id": pid_val, "name": _local_pokemon_name(pid_val, pretty_name)}
+                            {
+                                "id": pid_val,
+                                "name": _local_pokemon_name(pid_val, pretty_name),
+                            }
                         )
             if len(results) >= 20:
                 break

@@ -66,7 +66,9 @@ def _on_profile_did_open(online_connectivity, backup_manager=None):
             try:
                 backup_manager.refresh_profile_path()
             except Exception as e:
-                logger.log("error", f"Error refreshing backup path on profile open: {e}")
+                logger.log(
+                    "error", f"Error refreshing backup path on profile open: {e}"
+                )
 
         # Pause media sync for any uncaptured original BEFORE the first dialog
         # below can pump the event loop. Stat calls only; the scan that can
@@ -154,24 +156,27 @@ def _on_profile_did_open(online_connectivity, backup_manager=None):
                     "Ankimon could not install the pending imports listed below, "
                     "so those saves were not replaced. They will retry on a full "
                     "restart, or use Ankimon → Game → Cancel Pending Save Import, "
-                    "which covers both save modes.\n\n" +
-                    "\n".join(failures)
+                    "which covers both save modes.\n\n" + "\n".join(failures)
                 )
                 services._save_import_errors = []
             except Exception as e:
-                logger.log("error", f"Failed to report pending save import failures: {e}")
+                logger.log(
+                    "error", f"Failed to report pending save import failures: {e}"
+                )
         warnings = getattr(services, "_save_import_warnings", [])
         if warnings:
             try:
                 services.ui.warn(
                     "Ankimon installed the imported saves listed below, and they are active. "
                     "A final disk sync or cleanup step failed. Any remaining pending "
-                    "work will retry on a full restart without applying the import again.\n\n" +
-                    "\n".join(warnings)
+                    "work will retry on a full restart without applying the import again.\n\n"
+                    + "\n".join(warnings)
                 )
                 services._save_import_warnings = []
             except Exception as e:
-                logger.log("error", f"Failed to report save import finalization warnings: {e}")
+                logger.log(
+                    "error", f"Failed to report save import finalization warnings: {e}"
+                )
 
         # Register the AnkiWeb sync hooks SYNCHRONOUSLY here — not in the
         # backgrounded connectivity callback below. Anki fires profile_did_open
@@ -299,6 +304,7 @@ def register_profile_hooks(
         except Exception as e:
             logger.log("error", f"Error updating backup profile path: {e}")
         did_open_handler()
+
     def backup_handler():
         backup_manager.invalidate_context()
         backup_manager.on_anki_close()
