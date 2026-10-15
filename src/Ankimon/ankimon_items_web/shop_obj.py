@@ -1104,13 +1104,7 @@ class BackupBridge(QObject):
     def __init__(self, window):
         super().__init__()
         self._w = window
-        manager = getattr(window, "backup_manager", None)
-        if manager is not None:
-            if not hasattr(manager, "_web_action_lock"):
-                manager._web_action_lock = threading.Lock()
-            self._action_lock = manager._web_action_lock
-        else:
-            self._action_lock = threading.Lock()
+        self._operation = None
         self._action_active = False
         self._action_state_lock = threading.Lock()
         self._status_active = False
@@ -1156,24 +1150,32 @@ class BackupBridge(QObject):
             return False
 
     def _begin_action(self):
+        from ..save_import import SaveOperationBusyError, reserve_save_operation
+
         with self._action_state_lock:
-            if self._action_active or not self._action_lock.acquire(blocking=False):
+            if self._action_active:
+                return False
+            try:
+                self._operation = reserve_save_operation()
+            except SaveOperationBusyError:
                 return False
             self._action_active = True
             return True
 
-    def _end_action(self):
+    def _end_action(self, operation):
         with self._action_state_lock:
-            if self._action_active:
+            # A delayed completion must never release a newer request.
+            if self._operation is operation:
                 self._action_active = False
-                self._action_lock.release()
+                self._operation = None
+            operation.release()
 
     def _deliver_action_result(self, callback_name, result, finished):
         with finished["lock"]:
             if finished["delivered"]:
                 return
             finished["delivered"] = True
-        self._end_action()
+        self._end_action(finished["operation"])
         try:
             self._w.webview_backup.page().runJavaScript(
                 f"if (window.{callback_name}) window.{callback_name}({json.dumps(result)});"
@@ -1190,7 +1192,7 @@ class BackupBridge(QObject):
         """Return the set of resolved paths the manager currently lists as
         restorable backups. Used to confine WebChannel-supplied paths to
         entries the UI has actually shown the user."""
-        entries = manager.get_backups(include_inactive=True) or []
+        entries = manager.get_backups(include_inactive=False) or []
         permitted = set()
         for entry in entries:
             # Entries may be dicts (with a "path" key) or plain path strings.
@@ -1291,7 +1293,7 @@ class BackupBridge(QObject):
                         pending["message"] += f" Details: {pending_status['error']}"
             return {
                 "backups": worker_manager.get_backups(
-                    include_inactive=True,
+                    include_inactive=False,
                     active_filename=context.source_filename,
                 ),
                 "path": str(context.backups_path),
@@ -1300,6 +1302,8 @@ class BackupBridge(QObject):
             }
 
         def deliver(result):
+            from ..save_import import save_operation_busy
+
             self._status_active = False
             try:
                 context.validate()
@@ -1308,7 +1312,7 @@ class BackupBridge(QObject):
             except Exception:
                 result = {"stale": True}
             with self._action_state_lock:
-                result["busy"] = self._action_active or self._action_lock.locked()
+                result["busy"] = self._action_active or save_operation_busy()
             result["request_id"] = request_id
             try:
                 self._w.webview_backup.page().runJavaScript(
@@ -1356,8 +1360,9 @@ class BackupBridge(QObject):
         if not self._begin_action():
             return {
                 "ok": False,
-                "error": "Another backup action is already in progress.",
+                "error": "Another save operation is already in progress. Please wait.",
             }
+        operation = self._operation
         context_changed = [False]
 
         def run_backup(_col):
@@ -1371,22 +1376,30 @@ class BackupBridge(QObject):
                         "backup could be published."
                     )
 
-            validate_context()
-            return manager.create_backup(
-                manual=True,
-                show_notifications=False,
-                before_publish=validate_context,
-                context=context,
-            )
+            try:
+                operation.validate()
+                validate_context()
+                return manager.create_backup(
+                    manual=True,
+                    show_notifications=False,
+                    before_publish=validate_context,
+                    context=context,
+                )
+            finally:
+                self._end_action(operation)
 
-        finished = {"lock": threading.Lock(), "delivered": False}
+        finished = {
+            "lock": threading.Lock(),
+            "delivered": False,
+            "operation": operation,
+        }
 
         def finish_without_push():
             with finished["lock"]:
                 if finished["delivered"]:
                     return
                 finished["delivered"] = True
-            self._end_action()
+            self._end_action(operation)
 
         def on_success(ok, notify=True):
             result = {"ok": bool(ok)}
@@ -1441,7 +1454,7 @@ class BackupBridge(QObject):
                 return on_error(error, notify=False)
 
         try:
-            op = QueryOp(parent=self._w, op=run_backup, success=on_success)
+            op = QueryOp(parent=mw, op=run_backup, success=on_success)
             if hasattr(op, "failure"):
                 op.failure(on_error).without_collection().run_in_background()
             else:
@@ -1478,22 +1491,28 @@ class BackupBridge(QObject):
         if not self._begin_action():
             return {
                 "ok": False,
-                "error": "Another backup action is already in progress.",
+                "error": "Another save operation is already in progress. Please wait.",
             }
+        operation = self._operation
 
         def deliver_result(result):
             self._deliver_action_result("onBackupRestored", result, finished)
 
-        finished = {"lock": threading.Lock(), "delivered": False}
+        finished = {
+            "lock": threading.Lock(),
+            "delivered": False,
+            "operation": operation,
+        }
 
         def launch_restore(confirm_unverified=False):
-            def run_restore(_col):
+            def prepare_restore(_col):
                 restored = manager.restore_backup(
                     str(resolved),
                     interactive=False,
                     confirm_unverified=confirm_unverified,
                     context=context,
                     source_file=source_file,
+                    operation=operation,
                 )
 
                 if isinstance(restored, dict) and restored.get("status") == "staged":
@@ -1536,6 +1555,22 @@ class BackupBridge(QObject):
                         restored["pending_target"] = str(context.target)
                 return restored
 
+            def run_restore(_col):
+                needs_confirmation = False
+                try:
+                    operation.validate()
+                    restored = prepare_restore(_col)
+                    needs_confirmation = (
+                        isinstance(restored, dict)
+                        and restored.get("status") == "confirmation_required"
+                    )
+                    return restored
+                finally:
+                    # Keep ownership through the GUI confirmation and retry,
+                    # but terminal workers release even if their view is gone.
+                    if not needs_confirmation:
+                        self._end_action(operation)
+
             def on_success(restored):
                 if not isinstance(restored, dict):
                     result = {
@@ -1543,7 +1578,9 @@ class BackupBridge(QObject):
                         "error": "Backup restore returned an invalid result.",
                     }
                 elif restored.get("status") == "confirmation_required":
-                    if not self._context_matches(expected_context):
+                    if not is_alive(self._w) or not self._context_matches(
+                        expected_context
+                    ):
                         deliver_result(
                             {
                                 "ok": False,
@@ -1630,7 +1667,7 @@ class BackupBridge(QObject):
                 return
 
             try:
-                op = QueryOp(parent=self._w, op=run_restore, success=on_success)
+                op = QueryOp(parent=mw, op=run_restore, success=on_success)
                 if hasattr(op, "failure"):
                     op.failure(on_error).without_collection().run_in_background()
                 else:
@@ -1646,7 +1683,7 @@ class BackupBridge(QObject):
         try:
             launch_restore()
         except Exception as error:
-            self._end_action()
+            self._end_action(operation)
             return {"ok": False, "error": str(error)}
 
         return {"pending": True}
@@ -1656,12 +1693,13 @@ class BackupBridge(QObject):
         if not self._begin_action():
             return {
                 "ok": False,
-                "error": "Another backup action is already in progress.",
+                "error": "Another save operation is already in progress. Please wait.",
             }
+        operation = self._operation
         try:
             resolved = self._validate_backup_path(backup_path)
-        except ValueError as error:
-            self._end_action()
+        except Exception as error:
+            self._end_action(operation)
             return {"ok": False, "error": str(error)}
         try:
             return self._w.backup_manager.delete_backup(
@@ -1675,15 +1713,16 @@ class BackupBridge(QObject):
                 "traceback": traceback.format_exc(),
             }
         finally:
-            self._end_action()
+            self._end_action(operation)
 
     @pyqtSlot(result="QVariant")
     def openBackupFolder(self):
         if not self._begin_action():
             return {
                 "ok": False,
-                "error": "Another backup action is already in progress.",
+                "error": "Another save operation is already in progress. Please wait.",
             }
+        operation = self._operation
         try:
             manager = self._w.backup_manager
             manager.refresh_profile_path()
@@ -1707,7 +1746,7 @@ class BackupBridge(QObject):
                 "traceback": traceback.format_exc(),
             }
         finally:
-            self._end_action()
+            self._end_action(operation)
 
 
 class AnkimonItemsWeb(QDialog):

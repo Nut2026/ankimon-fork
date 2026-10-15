@@ -1147,6 +1147,7 @@ class BackupManager:
         context_validator=None,
         context=None,
         source_file=None,
+        operation=None,
     ):
         """Stage the selected backup for the next full process start.
 
@@ -1156,6 +1157,46 @@ class BackupManager:
         local recovery material rather than portable exports. Noninteractive
         callers handle the initial confirmation and restart themselves.
         """
+        from ..save_import import reserve_save_operation
+
+        owns_operation = operation is None
+        try:
+            if owns_operation:
+                operation = reserve_save_operation()
+            else:
+                operation.validate()
+        except RuntimeError as error:
+            if interactive:
+                showWarning(str(error))
+                return
+            return {"status": "failed", "error": str(error)}
+
+        try:
+            return self._restore_backup(
+                backup_path_str,
+                interactive=interactive,
+                confirm_unverified=confirm_unverified,
+                context_validator=context_validator,
+                context=context,
+                source_file=source_file,
+                operation=operation,
+            )
+        finally:
+            # The Web UI owns its reservation across damaged-save confirmation
+            # and the second worker. Native calls own only this invocation.
+            if owns_operation:
+                operation.release()
+
+    def _restore_backup(
+        self,
+        backup_path_str: str,
+        interactive: bool = True,
+        confirm_unverified: bool = False,
+        context_validator=None,
+        context=None,
+        source_file=None,
+        operation=None,
+    ):
         try:
             context = context or self.capture_context()
             context.validate()
@@ -1281,6 +1322,7 @@ class BackupManager:
                         retain_unverified=retain_unverified,
                         before_publish=validate_context,
                         publish_guard=context.publish,
+                        operation=operation,
                     )
                 finally:
                     # Cleanup cannot turn a successfully armed restore into a

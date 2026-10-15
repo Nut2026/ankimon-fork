@@ -33,6 +33,7 @@ _TIMEOUT = 30.0
 STARTUP_IMPORT_BUDGET = 30.0
 _PROCESS_ATTRIBUTE = "_ankimon_save_import_process"
 _STAGING_ATTRIBUTE = "_ankimon_save_import_staging"
+_OPERATION_ATTRIBUTE = "_ankimon_save_operation"
 
 
 def _process_staging_lock():
@@ -50,6 +51,72 @@ def _process_staging_lock():
 
 
 _STAGING_LOCK = _process_staging_lock()
+
+
+class SaveOperationBusyError(RuntimeError):
+    """A save request cannot start without waiting for another operation."""
+
+
+def _process_operation_state():
+    state = getattr(sys, _OPERATION_ATTRIBUTE, None)
+    if state is None or state["pid"] != os.getpid():
+        candidate = {"pid": os.getpid(), "lock": threading.Lock(), "owner": None}
+        state = vars(sys).setdefault(_OPERATION_ATTRIBUTE, candidate)
+        if state["pid"] != candidate["pid"]:
+            state = candidate
+            setattr(sys, _OPERATION_ATTRIBUTE, state)
+    return state
+
+
+class _SaveOperationLease:
+    def __init__(self, state):
+        self._state = state
+        self._owner = object()
+        self._release_lock = threading.Lock()
+        self._released = False
+
+    def validate(self):
+        with self._release_lock:
+            if (
+                self._released
+                or self._state["pid"] != os.getpid()
+                or self._state["owner"] is not self._owner
+            ):
+                raise RuntimeError("The save operation finished. Please confirm again.")
+
+    def release(self):
+        # Completion may arrive from both a worker and its GUI callback. An old
+        # callback must never release a newer request, including after reload.
+        with self._release_lock:
+            if self._released:
+                return
+            self._released = True
+            if (
+                self._state["pid"] == os.getpid()
+                and self._state["owner"] is self._owner
+            ):
+                self._state["owner"] = None
+                self._state["lock"].release()
+
+
+def reserve_save_operation():
+    """Reserve a request before dialogs or dispatch, without waiting for disk I/O.
+
+    The owner survives module purges and may finish on a different thread.
+    Callers lending it to another entry point retain responsibility for release.
+    """
+    state = _process_operation_state()
+    if not state["lock"].acquire(blocking=False):
+        raise SaveOperationBusyError(
+            "A save operation is already in progress. Please try again when it finishes."
+        )
+    lease = _SaveOperationLease(state)
+    state["owner"] = lease._owner
+    return lease
+
+
+def save_operation_busy():
+    return _process_operation_state()["lock"].locked()
 
 
 class ImportInstalledError(RuntimeError):
@@ -440,8 +507,45 @@ def pending_import_status(target: Path) -> dict:
     return {"state": state, "info": info}
 
 
-@_serialize_staging
 def stage_import(
+    snapshot: Path,
+    target: Path,
+    *,
+    sanitize_credentials: bool = True,
+    retain_unverified: bool = False,
+    before_publish=None,
+    publish_guard=None,
+    operation=None,
+    wait_for_staging: bool = True,
+) -> dict:
+    """Stage one reserved request; native GUI callers refuse a busy disk lock."""
+    owned = operation is None
+    operation = reserve_save_operation() if owned else operation
+    try:
+        operation.validate()
+        lock = _process_staging_lock()
+        if not lock.acquire(blocking=wait_for_staging):
+            raise SaveOperationBusyError(
+                "Save information is still loading. Please try again shortly."
+            )
+        try:
+            operation.validate()
+            return _stage_import(
+                snapshot,
+                target,
+                sanitize_credentials=sanitize_credentials,
+                retain_unverified=retain_unverified,
+                before_publish=before_publish,
+                publish_guard=publish_guard,
+            )
+        finally:
+            lock.release()
+    finally:
+        if owned:
+            operation.release()
+
+
+def _stage_import(
     snapshot: Path,
     target: Path,
     *,

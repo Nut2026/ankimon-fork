@@ -96,7 +96,10 @@ def test_reloaded_importer_serializes_against_old_worker(
         next_worker = threading.Thread(target=next_operation)
         next_worker.start()
         assert next_started.wait(5)
-        assert not next_finished.wait(0.1)
+        if operation == "stage":
+            assert next_finished.wait(1), "a competing request waited for disk work"
+        else:
+            assert not next_finished.wait(0.1)
     finally:
         release.set()
         old_worker.join(5)
@@ -104,11 +107,12 @@ def test_reloaded_importer_serializes_against_old_worker(
             next_worker.join(5)
     assert not old_worker.is_alive()
     assert next_worker is not None and not next_worker.is_alive()
-    assert "next_error" not in results
-    info = replacement.pending_import_info(target)
     if operation == "stage":
+        assert isinstance(results.pop("next_error"), replacement.SaveOperationBusyError)
         assert isinstance(results.get("old_error"), RuntimeError)
         assert "old" not in results
+        results["next"] = replacement.stage_import(new_source, target)
+        info = replacement.pending_import_info(target)
         assert info["token"] == results["next"]["token"]
         with closing(sqlite3.connect(info["pending_path"])) as connection:
             assert connection.execute(
@@ -116,6 +120,8 @@ def test_reloaded_importer_serializes_against_old_worker(
             ).fetchone() == ("new",)
         assert list(info["pending_path"].parent.glob("*.db")) == [info["pending_path"]]
     else:
+        assert "next_error" not in results
+        info = replacement.pending_import_info(target)
         assert "old_error" not in results
         assert results["next"] is True
         assert info is None
@@ -123,6 +129,39 @@ def test_reloaded_importer_serializes_against_old_worker(
         assert connection.execute(
             "SELECT value FROM config WHERE key='trainer.name'"
         ).fetchone() == ("live",)
+
+
+def test_request_owner_survives_reload_and_an_old_release_cannot_free_a_new_owner(
+    tmp_path,
+):
+    original = load_importer()
+    first = original.reserve_save_operation()
+    replacement = load_importer()
+    try:
+        with pytest.raises(replacement.SaveOperationBusyError):
+            replacement.reserve_save_operation()
+        released = threading.Thread(target=first.release)
+        released.start()
+        released.join(5)
+        assert not released.is_alive()
+        second = replacement.reserve_save_operation()
+        try:
+            first.release()
+            assert replacement.save_operation_busy()
+            target = make_save(tmp_path / "ankimon.db", "live")
+            source = make_save(tmp_path / "incoming.db", "incoming")
+            # Borrowed ownership is duck typed across module generations.
+            original.stage_import(source, target, operation=second)
+            assert replacement.save_operation_busy()
+            with pytest.raises(original.SaveOperationBusyError):
+                original.reserve_save_operation()
+        finally:
+            second.release()
+        assert not original.save_operation_busy()
+        with pytest.raises(RuntimeError, match="finished"):
+            second.validate()
+    finally:
+        first.release()
 
 
 def test_teardown_retires_manager_before_any_event_pump_or_widget_delete(monkeypatch):

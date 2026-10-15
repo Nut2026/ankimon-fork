@@ -497,6 +497,20 @@ def export_save(parent=None) -> bool:
 
 def import_save(parent=None) -> bool:
     """Replace the ACTIVE Ankimon save with a file the user chooses."""
+    from ..save_import import SaveOperationBusyError, reserve_save_operation
+
+    try:
+        operation = reserve_save_operation()
+    except SaveOperationBusyError as error:
+        showWarning(str(error))
+        return False
+    try:
+        return _import_save(parent, operation)
+    finally:
+        operation.release()
+
+
+def _import_save(parent, operation) -> bool:
     parent = parent or mw
     target = _active_db_path()
     collection = _active_collection()
@@ -531,7 +545,9 @@ def import_save(parent=None) -> bool:
         ):
             return False
 
-        return _replace_active_save(snapshot, target, "Import", collection=collection)
+        return _replace_active_save(
+            snapshot, target, "Import", collection=collection, operation=operation
+        )
     except Exception as e:
         showWarning(f"Import aborted: {e}. Nothing was replaced.")
         return False
@@ -597,8 +613,51 @@ def _warn_about_pending_import(message: str, context: str) -> None:
         _log_transfer_failure(context, error)
 
 
-def _replace_active_save(source: Path, target: Path, what: str, *, collection,
-                         local_revision=None, local_digest=None) -> bool:
+def _replace_active_save(
+    source: Path,
+    target: Path,
+    what: str,
+    *,
+    collection,
+    local_revision=None,
+    local_digest=None,
+    operation=None,
+) -> bool:
+    """Share Import's request owner, or reserve a separate media-rescue request."""
+    from ..save_import import SaveOperationBusyError, reserve_save_operation
+
+    owned = operation is None
+    try:
+        operation = reserve_save_operation() if owned else operation
+    except SaveOperationBusyError as error:
+        showWarning(str(error))
+        return False
+    try:
+        operation.validate()
+        return _stage_active_save(
+            source,
+            target,
+            what,
+            collection=collection,
+            local_revision=local_revision,
+            local_digest=local_digest,
+            operation=operation,
+        )
+    finally:
+        if owned:
+            operation.release()
+
+
+def _stage_active_save(
+    source: Path,
+    target: Path,
+    what: str,
+    *,
+    collection,
+    local_revision=None,
+    local_digest=None,
+    operation,
+) -> bool:
     """Prepare the approved save for a fresh process; never replace live state.
 
     Cancellation of Anki's asynchronous shutdown leaves the original runtime
@@ -646,9 +705,21 @@ def _replace_active_save(source: Path, target: Path, what: str, *, collection,
             # Staging reads only the media copy, and the next start snapshots the
             # final local save before installing, so nothing after the comparison
             # needs the live connection closed.
-            pending = stage_import(source, target, retain_unverified=retain_unverified)
+            pending = stage_import(
+                source,
+                target,
+                retain_unverified=retain_unverified,
+                operation=operation,
+                wait_for_staging=False,
+            )
         else:
-            pending = stage_import(source, target, retain_unverified=retain_unverified)
+            pending = stage_import(
+                source,
+                target,
+                retain_unverified=retain_unverified,
+                operation=operation,
+                wait_for_staging=False,
+            )
     except ImportAlreadyPendingError:
         # An earlier choice is still staged. "Nothing was replaced" is true of
         # this attempt and false of the session, which is the confusing half:
@@ -891,15 +962,36 @@ def _collect_import_cancellation(targets, validate=None):
     return {"message": "\n\n".join(outcomes), "is_error": False, "events": emitted}
 
 
-def _cancel_import_targets(targets, validate=None):
-    from ..save_import import _process_staging_lock
+def _cancel_import_targets(
+    targets, validate=None, operation=None, *, wait_for_staging=True
+):
+    from ..save_import import (
+        SaveOperationBusyError,
+        _process_staging_lock,
+        reserve_save_operation,
+    )
 
     # Status and cancellation describe the same manifest. Acquiring this lock
     # belongs on a worker: staging may be copying and verifying an entire save.
-    with _process_staging_lock():
-        if validate is not None:
-            validate()
-        return _collect_import_cancellation(targets, validate)
+    owned = operation is None
+    operation = reserve_save_operation() if owned else operation
+    try:
+        operation.validate()
+        lock = _process_staging_lock()
+        if not lock.acquire(blocking=wait_for_staging):
+            raise SaveOperationBusyError(
+                "Save information is still loading. Please try again shortly."
+            )
+        try:
+            operation.validate()
+            if validate is not None:
+                validate()
+            return _collect_import_cancellation(targets, validate)
+        finally:
+            lock.release()
+    finally:
+        if owned:
+            operation.release()
 
 
 def _report_import_cancellation(result, notify=None):
@@ -918,22 +1010,25 @@ def _report_import_cancellation(result, notify=None):
 
 def cancel_pending_save_import(notify=None) -> None:
     """Synchronous compatibility entry point; the native menu uses the worker."""
-    _report_import_cancellation(_cancel_import_targets(tuple(_import_targets())), notify)
+    from ..save_import import SaveOperationBusyError
+
+    try:
+        result = _cancel_import_targets(
+            tuple(_import_targets()),
+            wait_for_staging=False,
+        )
+    except SaveOperationBusyError as error:
+        result = {"message": str(error), "is_error": True, "events": []}
+    _report_import_cancellation(result, notify)
 
 
 def cancel_pending_save_import_async(context, notify=None) -> None:
     """Cancel captured saves on a worker without blocking Anki's menu or timers."""
     from aqt.operations import QueryOp
+    from ..save_import import SaveOperationBusyError, reserve_save_operation
 
-    # Capture paths before dispatch, while the originating profile is active.
-    # Duplicate menu clicks must not leave queued cancellations which could run
-    # after the user has prepared a replacement restore.
-    if getattr(context.manager, "_save_cancel_running", False):
-        return
-    context.validate()
-    targets = tuple(_import_targets())
-    context.manager._save_cancel_running = True
-
+    # Reserve before dispatch: a queued cancellation must exclude a replacement
+    # restore/import, just as duplicate clicks must not queue more cancellation.
     def current_notice(message, is_error=False):
         try:
             context.validate()
@@ -948,18 +1043,38 @@ def cancel_pending_save_import_async(context, notify=None) -> None:
             # while disk work finishes. Never revive it or show stale notices.
             _log_transfer_failure("could not show save cancellation outcome", error)
 
+    context.validate()
+    try:
+        operation = reserve_save_operation()
+    except SaveOperationBusyError as error:
+        current_notice(str(error), True)
+        return
+    try:
+        targets = tuple(_import_targets())
+    except Exception:
+        operation.release()
+        raise
+
     def done(result):
-        context.manager._save_cancel_running = False
+        operation.release()
         _report_import_cancellation(result, current_notice)
 
     def failed(error):
-        context.manager._save_cancel_running = False
+        operation.release()
         current_notice(f"The pending save import could not be cancelled: {error}", True)
+
+    def run_cancellation(_col):
+        try:
+            return _cancel_import_targets(targets, context.validate, operation)
+        finally:
+            # A destroyed view can prevent outcome delivery. Disk work owns the
+            # reservation until it finishes, independently of GUI callbacks.
+            operation.release()
 
     try:
         QueryOp(
             parent=mw,
-            op=lambda _col: _cancel_import_targets(targets, context.validate),
+            op=run_cancellation,
             success=done,
         ).failure(failed).without_collection().run_in_background()
     except Exception as error:

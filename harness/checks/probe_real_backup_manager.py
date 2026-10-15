@@ -2,6 +2,8 @@
 
 Anki's host is disposable. QueryOp uses a worker thread and delivers through Qt,
 so a status read waiting on import staging must not hold the GUI event loop.
+Active-database filtering and queued native cancellation also cross the real
+WebChannel boundary, including cancellation failure and dialog destruction.
 Run: python -m harness.checks.probe_real_backup_manager
 """
 
@@ -10,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
 import sys
 import threading
 import time
@@ -20,7 +23,15 @@ os.environ.setdefault(
     "QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox --disable-gpu --disable-dev-shm-usage"
 )
 
-from PyQt6.QtCore import QObject, QPoint, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QCoreApplication,
+    QEvent,
+    QObject,
+    QPoint,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt6.QtTest import QTest
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 
@@ -78,6 +89,7 @@ def main():
     from Ankimon.ankimon_items_web import shop_obj
     from Ankimon.singletons import get_items_window
     from Ankimon import save_import
+    from Ankimon.pyobj import save_transfer
     import aqt.operations
 
     aqt.operations.QueryOp = WorkerQueryOp
@@ -107,6 +119,67 @@ def main():
         "Backups were not loaded through WebChannel",
     )
     wait(lambda: not WorkerQueryOp.active, "Initial refresh did not finish")
+
+    # A restore row must contain the active database, rather than merely some
+    # save mode. Exercise filtering through real WebChannel status responses.
+    original_trainers = js(
+        "[...document.querySelectorAll('.backup-trainer strong')].map(e => e.textContent)"
+    )
+    snapshot = pathlib.Path(manager.get_backups()[0]["path"]) / "ankimon.db"
+    fixture_directories = []
+    for index, databases in enumerate(
+        (
+            {"ankimon.db": "NormalOnly"},
+            {"ankimonDEV.db": "DeveloperOnly"},
+            {"ankimon.db": "BothNormal", "ankimonDEV.db": "BothDeveloper"},
+            {"custom-save.db": "CustomOnly"},
+        )
+    ):
+        directory = manager.backups_path / f"backup_2000-01-0{index + 1}_00-00-00"
+        directory.mkdir()
+        fixture_directories.append(directory)
+        summary = {"date": f"2000-01-0{index + 1} 00-00-00"}
+        for filename, trainer in databases.items():
+            shutil.copyfile(snapshot, directory / filename)
+            key = "dev_stats" if filename == "ankimonDEV.db" else "normal_stats"
+            summary[key] = {"trainer_name": trainer}
+        (directory / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+
+    filtering_cases = (
+        ("ankimon.db", original_trainers + ["NormalOnly", "BothNormal"]),
+        ("ankimonDEV.db", ["DeveloperOnly", "BothDeveloper"]),
+        ("custom-save.db", ["CustomOnly"]),
+        ("ankimon.db", original_trainers + ["NormalOnly", "BothNormal"]),
+    )
+    for filename, expected in filtering_cases:
+        if db.db_path.name != filename:
+            assert db.switch_database(filename)
+        js("window.refreshBackups()")
+        wait(
+            lambda: (
+                sorted(
+                    js(
+                        "[...document.querySelectorAll('.backup-trainer strong')].map(e => e.textContent)"
+                    )
+                )
+                == sorted(expected)
+            ),
+            f"Backup rows did not match active database {filename}: {expected}",
+        )
+        wait(lambda: not WorkerQueryOp.active, "Mode filtering refresh did not finish")
+    for directory in fixture_directories:
+        shutil.rmtree(directory)
+    js("window.refreshBackups()")
+    wait(
+        lambda: (
+            js(
+                "[...document.querySelectorAll('.backup-trainer strong')].map(e => e.textContent)"
+            )
+            == original_trainers
+        ),
+        "Filtering fixtures were not removed from the rendered list",
+    )
+    wait(lambda: not WorkerQueryOp.active, "Filtering cleanup refresh did not finish")
 
     # Measure actual Chromium colours, including native pointer hover. Small
     # action labels need 4.5:1 contrast in either state.
@@ -230,7 +303,7 @@ def main():
                 result = window.backup_bridge.createBackup(confirmed)
             else:
                 result = window.backup_bridge.restoreBackup(
-                    next(iter(paths_before)), confirmed
+                    manager.get_backups()[0]["path"], confirmed
                 )
             assert result.get("pending"), result
             assert db.switch_database("ankimonDEV.db")
@@ -287,12 +360,130 @@ def main():
     assert js("document.getElementById('backup-status').textContent") == before
     assert "Cancel Pending Save Import" in before
     assert save_import.pending_import_info(db.db_path)["token"] == pending["token"]
+
+    # Reserve a native cancellation before its worker can run. A fresh status
+    # must disable the Web UI, and even a direct stale-page restore request must
+    # refuse while cancellation is queued. Release it, then prepare a new save
+    # through Chromium: the older cancellation must not remove that new import.
+    cancel_entered, allow_cancel = threading.Event(), threading.Event()
+    cancel_targets = save_transfer._cancel_import_targets
+
+    def queued_cancel(targets, validate=None, operation=None):
+        cancel_entered.set()
+        if not allow_cancel.wait(30):
+            raise TimeoutError("Controlled cancellation was not released")
+        return cancel_targets(targets, validate, operation)
+
+    with patch.object(save_transfer, "_cancel_import_targets", queued_cancel):
+        try:
+            save_transfer.cancel_pending_save_import_async(
+                manager.capture_context(), notify=window.show_backup_notice
+            )
+            assert cancel_entered.wait(5), "Cancellation worker did not queue"
+            assert save_import.save_operation_busy()
+            confirmed = window.backup_bridge._context_token()
+            rejected = window.backup_bridge.restoreBackup(
+                manager.get_backups()[0]["path"], confirmed
+            )
+            assert rejected.get("ok") is False and not rejected.get("pending"), rejected
+            assert (
+                save_import.pending_import_info(db.db_path)["token"] == pending["token"]
+            )
+            js("window.refreshBackups()")
+            wait(
+                lambda: js("document.querySelector('.restore-btn').disabled"),
+                "Queued native cancellation did not disable restore controls",
+            )
+            assert js("document.getElementById('manual-backup-btn').disabled")
+            js("document.querySelector('.restore-btn').click()")
+            assert js(
+                "document.getElementById('backup-modal').classList.contains('hidden')"
+            )
+        finally:
+            allow_cancel.set()
+        wait(lambda: not WorkerQueryOp.active, "Cancellation did not complete")
+    assert not save_import.save_operation_busy()
+    assert save_import.pending_import_info(db.db_path) is None
+    wait(
+        lambda: js(
+            "!document.getElementById('backup-modal').classList.contains('hidden')"
+        ),
+        "Native cancellation did not report its outcome",
+    )
+    js(
+        "document.getElementById('backup-modal-confirm').click(); window.refreshBackups()"
+    )
+    wait(
+        lambda: js("!document.querySelector('.restore-btn').disabled"),
+        "Restore controls stayed disabled after cancellation",
+    )
+    js(
+        "document.querySelector('.restore-btn').click(); document.getElementById('backup-modal-confirm').click()"
+    )
+    wait(
+        lambda: save_import.pending_import_info(db.db_path) is not None,
+        "A restore after cancellation was not staged",
+    )
+    wait(lambda: not WorkerQueryOp.active, "New restore did not complete")
+    replacement = save_import.pending_import_info(db.db_path)
+    assert replacement["token"] != pending["token"]
+    QTest.qWait(100)
+    assert save_import.pending_import_info(db.db_path)["token"] == replacement["token"]
+
+    # Worker failure must release the same reservation and leave the prepared
+    # replacement intact. Reporting the error must not keep controls disabled.
+    with patch.object(
+        save_transfer,
+        "_cancel_import_targets",
+        side_effect=OSError("Cancellation probe failure"),
+    ):
+        save_transfer.cancel_pending_save_import_async(
+            manager.capture_context(), notify=window.show_backup_notice
+        )
+        wait(lambda: not WorkerQueryOp.active, "Failed cancellation did not complete")
+    assert not save_import.save_operation_busy()
+    assert save_import.pending_import_info(db.db_path)["token"] == replacement["token"]
+    wait(
+        lambda: js(
+            "document.getElementById('backup-modal-message').textContent.includes('Cancellation probe failure')"
+        ),
+        "Native cancellation failure was not reported",
+    )
+    js(
+        "document.getElementById('backup-modal-confirm').click(); window.refreshBackups()"
+    )
+    wait(
+        lambda: js("!document.querySelector('.restore-btn').disabled"),
+        "Restore controls stayed disabled after cancellation failure",
+    )
+    wait(lambda: not WorkerQueryOp.active, "Failure refresh did not complete")
     screenshot = os.environ.get("ANKIMON_BACKUP_PROBE_SCREENSHOT")
     if screenshot:
         assert view.grab().save(screenshot)
-    save_import.cancel_pending_import(db.db_path)
-    wait(lambda: not WorkerQueryOp.active, "A worker remained active")
-    window.close()
+
+    # Native cancellation belongs to mw rather than the originating dialog. Its
+    # worker must finish and release the reservation even if that dialog dies.
+    cancel_entered.clear()
+    allow_cancel.clear()
+    with patch.object(save_transfer, "_cancel_import_targets", queued_cancel):
+        try:
+            save_transfer.cancel_pending_save_import_async(
+                manager.capture_context(), notify=window.show_backup_notice
+            )
+            assert cancel_entered.wait(5), "Final cancellation worker did not queue"
+            destroyed = []
+            window.destroyed.connect(lambda: destroyed.append(True))
+            window.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            assert destroyed, "The originating dialog was not destroyed"
+        finally:
+            allow_cancel.set()
+        wait(
+            lambda: not WorkerQueryOp.active,
+            "Cancellation did not survive dialog deletion",
+        )
+    assert save_import.pending_import_info(db.db_path) is None
+    assert not save_import.save_operation_busy()
     session.app.processEvents()
     print(
         json.dumps(
@@ -300,6 +491,8 @@ def main():
                 "backup_manager": "passed",
                 "gui_timer_seconds": fired[0],
                 "layout_cases": 4,
+                "active_database_filtering_cases": len(filtering_cases),
+                "native_cancellation_cases": 3,
             }
         )
     )

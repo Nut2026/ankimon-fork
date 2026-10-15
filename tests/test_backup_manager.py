@@ -3104,3 +3104,166 @@ def test_cancellation_context_survives_repeated_unavailable_backup_refresh(
     bm.invalidate_context()
     with pytest.raises(RuntimeError, match="changed"):
         current.validate()
+
+
+@pytest.mark.parametrize("interactive", [False, True])
+def test_restore_refuses_another_save_operation_before_reading_context(
+    mock_env, monkeypatch, interactive
+):
+    from Ankimon.save_import import reserve_save_operation, save_operation_busy
+
+    bm, _, _, _ = mock_env
+    operation = reserve_save_operation()
+
+    def unexpected_context():
+        pytest.fail("A busy restore must return before reading the selected save")
+
+    monkeypatch.setattr(bm, "capture_context", unexpected_context)
+    try:
+        result = bm.restore_backup("unused", interactive=interactive)
+        if interactive:
+            assert result is None
+            assert "in progress" in _bm_mod.showWarning.call_args.args[0]
+        else:
+            assert result["status"] == "failed"
+            assert "in progress" in result["error"]
+        operation.validate()
+        assert save_operation_busy()
+    finally:
+        operation.release()
+    assert not save_operation_busy()
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "stale_context",
+        "missing_source",
+        "confirmation_required",
+        "confirmation_declined",
+        "dialog_error",
+        "context_during_copy",
+        "staging_error",
+        "staged",
+    ],
+)
+def test_native_restore_releases_its_save_operation_on_every_exit(
+    mock_env, monkeypatch, outcome
+):
+    import Ankimon.save_import as save_import
+
+    bm, db, _, _ = mock_env
+    selected = bm.backups_path / "backup_reserved"
+    selected.mkdir()
+    if outcome != "missing_source":
+        _seed_db(selected / "ankimon.db", "Selected recovery", 123)
+    context = bm.capture_context()
+    if outcome == "stale_context":
+        bm.invalidate_context()
+    elif outcome == "confirmation_required":
+        monkeypatch.setattr(
+            save_import, "should_confirm_unverified_copy", lambda _: True
+        )
+    elif outcome in ("confirmation_declined", "dialog_error"):
+
+        def confirm(*args, **kwargs):
+            assert save_import.save_operation_busy()
+            if outcome == "dialog_error":
+                raise RuntimeError("confirmation unavailable")
+            return False
+
+        monkeypatch.setattr(_bm_mod, "askUser", confirm)
+    elif outcome == "context_during_copy":
+        copy_source = bm._copy_restore_source
+
+        def copy_then_retire(*args, **kwargs):
+            result = copy_source(*args, **kwargs)
+            bm.invalidate_context()
+            return result
+
+        monkeypatch.setattr(bm, "_copy_restore_source", copy_then_retire)
+
+    stage = save_import.stage_import
+
+    def stage_with_owner(*args, **kwargs):
+        kwargs["operation"].validate()
+        assert save_import.save_operation_busy()
+        if outcome == "staging_error":
+            raise OSError("staging unavailable")
+        return stage(*args, **kwargs)
+
+    monkeypatch.setattr(save_import, "stage_import", stage_with_owner)
+    try:
+        interactive = outcome in ("confirmation_declined", "dialog_error")
+        if outcome == "dialog_error":
+            with pytest.raises(RuntimeError, match="confirmation unavailable"):
+                bm.restore_backup(str(selected), context=context)
+        else:
+            result = bm.restore_backup(
+                str(selected), interactive=interactive, context=context
+            )
+            expected = (
+                "staged"
+                if outcome == "staged"
+                else "confirmation_required"
+                if outcome == "confirmation_required"
+                else "failed"
+            )
+            assert result is None if interactive else result["status"] == expected
+        assert not save_import.save_operation_busy()
+        pending = save_import.pending_import_info(db.db_path)
+        assert (pending is not None) == (outcome == "staged")
+        assert db.get_config_value("trainer.name") == "Red"
+    finally:
+        save_import.cancel_pending_import(db.db_path)
+
+
+def test_restore_borrows_save_operation_across_damaged_save_confirmation(
+    mock_env, monkeypatch
+):
+    from concurrent.futures import ThreadPoolExecutor
+    import Ankimon.save_import as save_import
+
+    bm, db, _, _ = mock_env
+    selected = bm.backups_path / "backup_borrowed"
+    selected.mkdir()
+    _seed_db(selected / "ankimon.db", "Borrowed recovery", 123)
+    context = bm.capture_context()
+    monkeypatch.setattr(save_import, "should_confirm_unverified_copy", lambda _: True)
+    operation = save_import.reserve_save_operation()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            first = pool.submit(
+                bm.restore_backup,
+                str(selected),
+                interactive=False,
+                context=context,
+                operation=operation,
+            ).result(5)
+            assert first["status"] == "confirmation_required"
+            operation.validate()
+            assert save_import.save_operation_busy()
+            assert save_import.pending_import_info(db.db_path) is None
+            second = pool.submit(
+                bm.restore_backup,
+                str(selected),
+                interactive=False,
+                confirm_unverified=True,
+                context=context,
+                operation=operation,
+            ).result(5)
+        assert second["status"] == "staged", second
+        operation.validate()
+        assert save_import.save_operation_busy()
+        pending = save_import.pending_import_info(db.db_path)
+        assert pending["token"] == second["pending_token"]
+        assert pending["retain_unverified"]
+        with closing(sqlite3.connect(pending["pending_path"])) as staged:
+            assert staged.execute(
+                "SELECT value FROM config WHERE key='trainer.name'"
+            ).fetchone() == ("Borrowed recovery",)
+        assert db.get_config_value("trainer.name") == "Red"
+    finally:
+        operation.release()
+        save_import.cancel_pending_import(db.db_path)
+    assert not save_import.save_operation_busy()
