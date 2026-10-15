@@ -151,7 +151,7 @@ def _run(directory, fixtures):
     click('[data-item-name="linking-cord"]')
     click(".det-action-btn.buy")
     assert _wait_until(lambda: db.get_item("linking-cord")["quantity"] == 13)
-    assert d.services.settings.get("trainer.cash") == 12000
+    assert d.services.settings.get("trainer.cash") == 20000 - cord["price"]
     screenshot("linking-cord-shop")
 
     def open_picker(item):
