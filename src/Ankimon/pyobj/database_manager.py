@@ -700,6 +700,17 @@ class AnkimonDB:
         with self._conn_lock:
             return (str(self.db_path), self._connection_epoch)
 
+    def run_with_identity(self, expected, operation):
+        """Publish one short filesystem operation against a confirmed generation.
+
+        Share the switch/close barrier; callers must release it between retries
+        and must never hold it while copying a save or waiting for user input.
+        """
+        with self._conn_lock:
+            if self.identity_token() != expected:
+                raise RuntimeError("The confirmed save changed. Please confirm again.")
+            return operation()
+
     def close(self, wait_seconds: float = 0.0) -> bool:
         """Close the current generation within one shared deadline."""
         with self._conn_lock:

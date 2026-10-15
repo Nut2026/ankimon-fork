@@ -4,7 +4,7 @@ Run: QT_QPA_PLATFORM=offscreen python3 -m harness.checks.probe_real_item_evoluti
 Optional screenshot directory: ANKIMON_PROOF_SCREENSHOTS=/tmp/pr838-screenshots
 """
 
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from datetime import datetime
 import json
 import os
@@ -17,14 +17,23 @@ from harness.checks.probe_item_evolutions import LINKING_CORD_EVOLUTIONS
 from harness.real_driver import RealDriver
 
 
+class _ShopClock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 10, 15, 12, tzinfo=tz)
+
+
 def run_proof():
     """Run the real UI proof without using or changing a shared sprite cache."""
     # Never link this fixture to a developer's shared sprite pack.
-    with tempfile.TemporaryDirectory(prefix="ankimon-items-proof-") as directory:
+    with (
+        tempfile.TemporaryDirectory(prefix="ankimon-items-proof-") as directory,
+        ExitStack() as fixtures,
+    ):
         previous_cache = os.environ.get("ANKIMON_SPRITE_CACHE")
         os.environ["ANKIMON_SPRITE_CACHE"] = str(Path(directory) / "no-cache")
         try:
-            return _run(directory)
+            return _run(directory, fixtures)
         finally:
             if previous_cache is None:
                 os.environ.pop("ANKIMON_SPRITE_CACHE", None)
@@ -32,16 +41,8 @@ def run_proof():
                 os.environ["ANKIMON_SPRITE_CACHE"] = previous_cache
 
 
-def _run(directory):
+def _run(directory, fixtures):
     """Exercise purchases and item evolutions against real Qt, Chromium and SQLite."""
-    from harness import clock
-
-    # Daily stock is date-seeded and its pool changes as items are added. This
-    # proof needs to buy a specific item, so seed its real SQLite shop fixture
-    # under a fixed calendar before opening any shop screen (also avoids a
-    # midnight rollover invalidating that fixture during the confirmations).
-    clock.install_clock(datetime(2026, 10, 14, 12, 0))
-
     from PyQt6.QtCore import Qt
     from PyQt6.QtGui import QPixmap
     from PyQt6.QtTest import QTest
@@ -64,21 +65,33 @@ def _run(directory):
     from Ankimon.singletons import get_items_window, get_item_window, get_evo_window
     from Ankimon.functions.pokedex_functions import get_pretty_name_for_id
     from Ankimon.ankimon_items_web.shop_obj import SCREEN_ITEMS
+    from Ankimon.pyobj import ankimon_shop
 
     db = d.services.db
-    cord_price = utils.get_item_price("linking-cord")
-    assert cord_price and cord_price > 0, "The Linking Cord lost its real shop price"
-    db.set_user_data(
-        "todays_shop",
-        {
-            "date": clock.now().strftime("%Y-%m-%d"),
-            "items": [{"name": "linking-cord", "price": cord_price}],
-            "technical_machines": [],
-        },
-    )
     utils.items_path.mkdir(parents=True, exist_ok=True)
     assert not (utils.items_path / "linking-cord.png").exists()
     assert not QPixmap(str(utils.get_item_sprite_path("linking-cord"))).isNull()
+    # This proof buys a Cord before testing evolutions. Owning one does not
+    # put it in the shop view, and the rotating stock can omit it as the pool
+    # grows. Seed the real shop entry and hold its date through every refresh.
+    fixtures.enter_context(patch.object(ankimon_shop, "datetime", _ShopClock))
+    cord = next(
+        (
+            item
+            for item in ankimon_shop.get_daily_items_pool()
+            if item["name"] == "linking-cord"
+        ),
+        None,
+    )
+    assert cord is not None, "Linking Cord is missing from the shop pool"
+    db.set_user_data(
+        "todays_shop",
+        {
+            "date": _ShopClock.now().strftime("%Y-%m-%d"),
+            "items": [cord],
+            "technical_machines": [],
+        },
+    )
     pairs = [
         (prevo, evolved, "linking-cord") for prevo, evolved in LINKING_CORD_EVOLUTIONS
     ]
@@ -138,7 +151,7 @@ def _run(directory):
     click('[data-item-name="linking-cord"]')
     click(".det-action-btn.buy")
     assert _wait_until(lambda: db.get_item("linking-cord")["quantity"] == 13)
-    assert d.services.settings.get("trainer.cash") == 20000 - cord_price
+    assert d.services.settings.get("trainer.cash") == 20000 - cord["price"]
     screenshot("linking-cord-shop")
 
     def open_picker(item):
