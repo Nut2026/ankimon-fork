@@ -2130,6 +2130,7 @@ class AnkimonItemsWeb(QDialog):
             self.webview_backup.page().runJavaScript(
                 "if (window.refreshBackups) window.refreshBackups();"
             )
+            self._push_backup_notice()
         elif self.current_screen == SCREEN_HISTORY:
             db = services.db
             data = db.get_mobile_history() if db is not None else []

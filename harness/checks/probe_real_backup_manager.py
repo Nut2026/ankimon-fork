@@ -430,33 +430,56 @@ def main():
     QTest.qWait(100)
     assert save_import.pending_import_info(db.db_path)["token"] == replacement["token"]
 
-    # Worker failure must release the same reservation and leave the prepared
-    # replacement intact. Reporting the error must not keep controls disabled.
-    with patch.object(
-        save_transfer,
-        "_cancel_import_targets",
-        side_effect=OSError("Cancellation probe failure"),
-    ):
-        save_transfer.cancel_pending_save_import_async(
-            manager.capture_context(), notify=window.show_backup_notice
+    # Worker failure must release the reservation and preserve the prepared
+    # replacement. If the user navigates away while cancellation is queued,
+    # its error must also appear when they return to the cached backup page.
+    for navigate_away in (False, True):
+        message = f"Cancellation probe failure (navigation={navigate_away})"
+        with patch.object(
+            save_transfer, "_cancel_import_targets", side_effect=OSError(message)
+        ):
+            WorkerQueryOp.gate.clear()
+            try:
+                save_transfer.cancel_pending_save_import_async(
+                    manager.capture_context(), notify=window.show_backup_notice
+                )
+                if navigate_away:
+                    window.load_screen(shop_obj.SCREEN_ITEMS)
+                    wait(
+                        lambda: shop_obj.SCREEN_ITEMS in window.ready_screens,
+                        "Items did not load while cancellation was queued",
+                    )
+            finally:
+                WorkerQueryOp.gate.set()
+            wait(
+                lambda: not WorkerQueryOp.active, "Failed cancellation did not complete"
+            )
+        assert not save_import.save_operation_busy()
+        assert (
+            save_import.pending_import_info(db.db_path)["token"] == replacement["token"]
         )
-        wait(lambda: not WorkerQueryOp.active, "Failed cancellation did not complete")
-    assert not save_import.save_operation_busy()
-    assert save_import.pending_import_info(db.db_path)["token"] == replacement["token"]
-    wait(
-        lambda: js(
-            "document.getElementById('backup-modal-message').textContent.includes('Cancellation probe failure')"
-        ),
-        "Native cancellation failure was not reported",
-    )
-    js(
-        "document.getElementById('backup-modal-confirm').click(); window.refreshBackups()"
-    )
-    wait(
-        lambda: js("!document.querySelector('.restore-btn').disabled"),
-        "Restore controls stayed disabled after cancellation failure",
-    )
-    wait(lambda: not WorkerQueryOp.active, "Failure refresh did not complete")
+        if navigate_away:
+            assert window._pending_backup_notice == (
+                f"The pending save import could not be cancelled: {message}",
+                True,
+            )
+            window.load_screen(shop_obj.SCREEN_BACKUP)
+        wait(
+            lambda: js(
+                "!document.getElementById('backup-modal').classList.contains('hidden')"
+                f" && document.getElementById('backup-modal-message').textContent.includes({json.dumps(message)})"
+            ),
+            "Native cancellation failure was not reported on the backup page",
+        )
+        assert window._pending_backup_notice is None
+        js(
+            "document.getElementById('backup-modal-confirm').click(); window.refreshBackups()"
+        )
+        wait(
+            lambda: js("!document.querySelector('.restore-btn').disabled"),
+            "Restore controls stayed disabled after cancellation failure",
+        )
+        wait(lambda: not WorkerQueryOp.active, "Failure refresh did not complete")
     screenshot = os.environ.get("ANKIMON_BACKUP_PROBE_SCREENSHOT")
     if screenshot:
         assert view.grab().save(screenshot)
@@ -492,7 +515,7 @@ def main():
                 "gui_timer_seconds": fired[0],
                 "layout_cases": 4,
                 "active_database_filtering_cases": len(filtering_cases),
-                "native_cancellation_cases": 3,
+                "native_cancellation_cases": 4,
             }
         )
     )
