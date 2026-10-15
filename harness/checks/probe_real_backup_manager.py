@@ -265,7 +265,13 @@ def main():
             QTest.keyClick(view.focusProxy(), Qt.Key.Key_Tab, modifier)
             assert js("document.activeElement.closest('#backup-modal') !== null")
     QTest.keyClick(view.focusProxy(), Qt.Key.Key_Escape)
-    assert js("document.getElementById('backup-modal').classList.contains('hidden')")
+    # Native Qt key delivery can complete before Chromium handles Escape.
+    wait(
+        lambda: js(
+            "document.getElementById('backup-modal').classList.contains('hidden')"
+        ),
+        "Escape did not close the backup confirmation",
+    )
     assert js("document.activeElement.classList.contains('restore-btn')")
 
     # Native menu navigation and window hide also retire destructive callbacks.
