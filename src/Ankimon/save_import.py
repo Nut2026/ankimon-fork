@@ -32,7 +32,24 @@ _TIMEOUT = 30.0
 # shutdown backup does, rather than a full SQLite timeout per file per step.
 STARTUP_IMPORT_BUDGET = 30.0
 _PROCESS_ATTRIBUTE = "_ankimon_save_import_process"
-_STAGING_LOCK = threading.RLock()
+_STAGING_ATTRIBUTE = "_ankimon_save_import_staging"
+
+
+def _process_staging_lock():
+    # Developer reload purges this module while its workers may still run.
+    # Coordinate the old and new modules through sys, which survives that purge.
+    # A fork must not reuse a lock possibly held by a vanished parent thread.
+    state = getattr(sys, _STAGING_ATTRIBUTE, None)
+    if state is None or state[0] != os.getpid():
+        candidate = (os.getpid(), threading.RLock())
+        state = vars(sys).setdefault(_STAGING_ATTRIBUTE, candidate)
+        if state[0] != candidate[0]:
+            state = candidate
+            setattr(sys, _STAGING_ATTRIBUTE, state)
+    return state[1]
+
+
+_STAGING_LOCK = _process_staging_lock()
 
 
 class ImportInstalledError(RuntimeError):
@@ -100,7 +117,7 @@ def _paths(target: Path) -> tuple[Path, Path]:
 def _serialize_staging(operation):
     @wraps(operation)
     def serialized(*args, **kwargs):
-        with _STAGING_LOCK:
+        with _process_staging_lock():
             return operation(*args, **kwargs)
 
     return serialized

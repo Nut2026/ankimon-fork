@@ -20,7 +20,7 @@ os.environ.setdefault(
     "QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox --disable-gpu --disable-dev-shm-usage"
 )
 
-from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QPoint, Qt, QTimer, pyqtSignal
 from PyQt6.QtTest import QTest
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 
@@ -107,6 +107,33 @@ def main():
         "Backups were not loaded through WebChannel",
     )
     wait(lambda: not WorkerQueryOp.active, "Initial refresh did not finish")
+
+    # Measure actual Chromium colours, including native pointer hover. Small
+    # action labels need 4.5:1 contrast in either state.
+    for selector in (".restore-btn", ".delete-btn"):
+        for hovered in (False, True):
+            point = js(f"""(() => {{
+                const r = document.querySelector('{selector}').getBoundingClientRect();
+                return {{x: r.x + r.width / 2, y: r.y + r.height / 2}};
+            }})()""")
+            QTest.mouseMove(
+                view.focusProxy(),
+                QPoint(int(point["x"]), int(point["y"])) if hovered else QPoint(2, 2),
+            )
+            QTest.qWait(100)
+            contrast = js(f"""(() => {{
+                const button = document.querySelector('{selector}');
+                const s = getComputedStyle(button);
+                const luminance = color => {{
+                    const linear = color.match(/[\\d.]+/g).slice(0, 3).map(Number)
+                        .map(v => v / 255).map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4);
+                    return linear.reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
+                }};
+                const values = [luminance(s.color), luminance(s.backgroundColor)].sort((a, b) => a - b);
+                return {{ratio: (values[1] + .05) / (values[0] + .05), hovered: button.matches(':hover')}};
+            }})()""")
+            assert contrast["hovered"] == hovered, (selector, contrast)
+            assert contrast["ratio"] >= 4.5, (selector, hovered, contrast)
 
     # A real status worker queues behind staging. The GUI timer must fire while
     # that lock is still held, not merely once the worker finally releases it.

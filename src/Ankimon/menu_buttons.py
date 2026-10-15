@@ -26,7 +26,7 @@ from .pyobj.achievement_window import AchievementWindow
 from .pyobj.ankimon_tracker_window import AnkimonTrackerWindow
 from .pyobj.backup_manager import BackupManager
 from .pyobj.save_transfer import (
-    export_save, import_save, cancel_pending_save_import, browse_recovered_saves,
+    export_save, import_save, cancel_pending_save_import_async, browse_recovered_saves,
 )
 from .gui_classes.backup_manager_dialog import BackupManagerDialog
 from .gui_entities import (
@@ -242,7 +242,11 @@ def create_menu_actions(
     cancel_import_action.setMenuRole(QAction.MenuRole.NoRole)
     def _cancel_pending_save_import_in_backup_manager():
         window = _open_shell_at("backup_manager")
-        cancel_pending_save_import(notify=window.show_backup_notice)
+        try:
+            context = backup_manager.capture_context(require_backup_path=False)
+            cancel_pending_save_import_async(context, notify=window.show_backup_notice)
+        except Exception as error:
+            window.show_backup_notice(str(error), True)
 
     cancel_import_action.triggered.connect(_cancel_pending_save_import_in_backup_manager)
     game_menu.addAction(cancel_import_action)

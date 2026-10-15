@@ -594,8 +594,9 @@ def test_incomplete_backup_survives_failed_removal_without_evicting_valid_backup
 
 
 @pytest.mark.parametrize("prefix", ["backup_", ".backup_"])
-def test_failed_backup_mkdir_preserves_existing_same_timestamp_directory(
-    mock_env, prefix
+@pytest.mark.parametrize("snapshot_succeeds", [True, False])
+def test_same_timestamp_backup_reserves_another_directory(
+    mock_env, monkeypatch, prefix, snapshot_succeeds
 ):
     bm, _, _, _ = mock_env
     now = datetime.datetime.now()
@@ -607,15 +608,24 @@ def test_failed_backup_mkdir_preserves_existing_same_timestamp_directory(
     # Even an expired existing backup must survive a failed creation attempt.
     # A colliding staging directory is another attempt's and stays fresh: one
     # past the stale age was abandoned, and a failed attempt sweeps it too.
-    if prefix == "backup_":
+    if prefix == "backup_" and not snapshot_succeeds:
         expired = time.time() - 30 * 24 * 3600
         os.utime(backup_dir, (expired, expired))
+    if not snapshot_succeeds:
+
+        def fail_snapshot(*args, **kwargs):
+            raise OSError("snapshot unavailable")
+
+        monkeypatch.setattr(bm, "_snapshot_database", fail_snapshot)
 
     with patch.object(_bm_mod.datetime, "datetime", wraps=datetime.datetime) as clock:
         clock.now.return_value = now
-        assert bm.create_backup() is False
+        assert bm.create_backup() is snapshot_succeeds
 
     assert database.read_bytes() == original
+    published = set(bm.backups_path.glob("backup_*")) - {backup_dir}
+    assert len(published) == int(snapshot_succeeds)
+    assert set(bm.backups_path.glob(".backup_*")) <= {backup_dir}
 
 
 def test_failed_other_mode_snapshot_keeps_successful_required_backup(mock_env):
@@ -633,6 +643,32 @@ def test_failed_other_mode_snapshot_keeps_successful_required_backup(mock_env):
             == "5000"
         )
     assert not (backup_dir / "ankimonDEV.db").exists()
+
+
+def test_backup_reservation_rechecks_concurrently_published_name(mock_env, monkeypatch):
+    bm, _, _, _ = mock_env
+    now = datetime.datetime.now()
+    published = bm.backups_path / f"backup_{now:%Y-%m-%d_%H-%M-%S}"
+    staging = published.with_name(f".{published.name}")
+    mkdir = Path.mkdir
+    concurrent_bytes = []
+
+    def publish_before_reservation(path, *args, **kwargs):
+        if path == staging:
+            # A prior worker's rename happens after our published-name check
+            # but before we acquire the staging name it has just released.
+            mkdir(published)
+            _seed_db(published / "ankimon.db", "Concurrent backup", 123)
+            concurrent_bytes.append((published / "ankimon.db").read_bytes())
+        return mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", publish_before_reservation)
+    with patch.object(_bm_mod.datetime, "datetime", wraps=datetime.datetime) as clock:
+        clock.now.return_value = now
+        assert bm.create_backup()
+    assert len(list(bm.backups_path.glob("backup_*"))) == 2
+    assert (published / "ankimon.db").read_bytes() == concurrent_bytes[0]
+    assert not list(bm.backups_path.glob(".backup_*"))
 
 
 def test_snapshot_timeout_does_not_publish_partial_backup(mock_env, tmp_path):
@@ -2740,6 +2776,125 @@ def test_custom_filename_is_listed_and_restorable(mock_env, tmp_path):
         services.db = db
 
 
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges")
+@pytest.mark.parametrize("filename", ["ankimon.db", "ankimonDEV.db", "profile-save.db"])
+def test_linked_active_save_preserves_logical_backup_filename(
+    mock_env, tmp_path, filename
+):
+    from Ankimon.save_import import cancel_pending_import, pending_import_info
+
+    bm, original_db, _, _ = mock_env
+    physical = tmp_path / "external" / "physical-save.db"
+    physical.parent.mkdir()
+    alias = tmp_path / "aliases" / filename
+    alias.parent.mkdir()
+    alias.symlink_to(physical)
+    active = AnkimonDB(MockLogger(), db_path=alias)
+    try:
+        services.db = active
+        active.set_config_value("trainer.name", "Current linked save")
+        context = bm.capture_context()
+        assert context.target == physical
+        assert context.source_filename == filename
+        legacy = bm.backups_path / "backup_existing"
+        legacy.mkdir()
+        _seed_db(legacy / filename, "Existing recovery", 123)
+        (legacy / "summary.json").write_text("{}", encoding="utf-8")
+
+        result = bm.restore_backup(str(legacy), interactive=False, context=context)
+        assert result["status"] == "staged", result
+        assert Path(result["pending_target"]) == physical
+        pending = pending_import_info(physical)
+        with closing(sqlite3.connect(pending["pending_path"])) as staged:
+            assert staged.execute(
+                "SELECT value FROM config WHERE key='trainer.name'"
+            ).fetchone() == ("Existing recovery",)
+        assert cancel_pending_import(physical)
+
+        assert bm.create_backup(manual=True, show_notifications=False, context=context)
+        [created] = set(bm.backups_path.glob("backup_*")) - {legacy}
+        assert (created / filename).is_file()
+        assert not (created / physical.name).exists()
+        for rows in (
+            bm.get_backups(include_inactive=True),
+            bm.get_backups(
+                include_inactive=True, active_filename=context.source_filename
+            ),
+        ):
+            assert str(created) in {row["path"] for row in rows}
+        result = bm.restore_backup(str(created), interactive=False, context=context)
+        assert result["status"] == "staged", result
+        pending = pending_import_info(physical)
+        with closing(sqlite3.connect(pending["pending_path"])) as staged:
+            assert staged.execute(
+                "SELECT value FROM config WHERE key='trainer.name'"
+            ).fetchone() == ("Current linked save",)
+        assert alias.is_symlink()
+        assert active.get_config_value("trainer.name") == "Current linked save"
+    finally:
+        cancel_pending_import(physical)
+        active.close()
+        services.db = original_db
+
+
+@pytest.mark.parametrize("profile_closes", [False, True])
+def test_overlapping_same_second_backups_keep_shutdown_snapshot(
+    mock_env, monkeypatch, profile_closes
+):
+    bm, db, _, _ = mock_env
+    now = datetime.datetime.now()
+    context = bm.capture_context()
+    copied, release = threading.Event(), threading.Event()
+    results, errors = [], []
+    snapshot = bm._snapshot_database
+
+    def pause_manual(source, target, **kwargs):
+        snapshot(source, target, **kwargs)
+        if threading.current_thread() is worker:
+            copied.set()
+            assert release.wait(5), "manual worker not released"
+
+    def manual():
+        try:
+            results.append(
+                bm.create_backup(manual=True, show_notifications=False, context=context)
+            )
+        except Exception as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=manual)
+    monkeypatch.setattr(bm, "_snapshot_database", pause_manual)
+    with patch.object(_bm_mod.datetime, "datetime", wraps=datetime.datetime) as clock:
+        clock.now.return_value = now
+        worker.start()
+        try:
+            assert copied.wait(5), "manual snapshot did not complete"
+            db.set_config_value("trainer.name", "Final session progress")
+            if profile_closes:
+                bm.invalidate_context()
+            assert bm.create_backup(deadline=time.monotonic() + 5)
+        finally:
+            release.set()
+            worker.join(5)
+    assert not worker.is_alive()
+    assert errors == []
+    assert results == [not profile_closes]
+    published = list(bm.backups_path.glob("backup_*"))
+    assert len(published) == (1 if profile_closes else 2)
+    saved_names = []
+    for directory in published:
+        with closing(sqlite3.connect(directory / "ankimon.db")) as saved:
+            saved_names.append(
+                saved.execute(
+                    "SELECT value FROM config WHERE key='trainer.name'"
+                ).fetchone()[0]
+            )
+    assert "Final session progress" in saved_names
+    if not profile_closes:
+        assert "Red" in saved_names
+    assert not list(bm.backups_path.glob(".backup_*"))
+
+
 @pytest.mark.parametrize("filename", ["ankimon.db", "ankimonDEV.db", "profile-save.db"])
 def test_incomplete_linked_migration_keeps_usable_original_listed(
     mock_env, tmp_path, filename
@@ -2819,3 +2974,133 @@ def test_account_change_during_copy_cannot_publish_wrong_save(
         assert copied == [selected / "ankimon.db"]
     assert not list(user_files.glob(".ankimon-import-*/pending.json"))
     assert list(bm.backups_path.glob("backup_*")) == [selected]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges")
+@pytest.mark.parametrize("dispatch", ["native_confirmation", "queued_worker"])
+@pytest.mark.parametrize("nested_referent", [False, True])
+def test_restore_linked_selection_keeps_source_after_migration(
+    mock_env, monkeypatch, dispatch, nested_referent
+):
+    from Ankimon.save_import import cancel_pending_import, pending_import_info
+
+    bm, active, _, addon = mock_env
+    legacy = addon.parent / "ankimon_backups"
+    payload = legacy / "backup_payload"
+    referent_folder = payload / "nested" if nested_referent else payload
+    referent_folder.mkdir(parents=True)
+    _seed_db(referent_folder / "renamed-recovery.db", "Selected recovery", 111)
+    _seed_db(payload / "ankimon.db", "Unselected sibling", 222)
+    if nested_referent:
+        _seed_db(referent_folder / "ankimon.db", "Unselected nested sibling", 333)
+    selected = legacy / "backup_selected"
+    selected.mkdir()
+    link_target = os.path.relpath(referent_folder / "renamed-recovery.db", selected)
+    (selected / "ankimon.db").symlink_to(link_target)
+    (selected / "summary.json").write_text("{}", encoding="utf-8")
+    assert str(selected) in {row["path"] for row in bm.get_backups()}
+    context = bm.capture_context()
+    source_file = (selected / context.source_filename).resolve()
+    target = active.db_path
+    identity = active.identity_token()
+
+    try:
+        if dispatch == "native_confirmation":
+            # A native dialog runs the event loop while the migration worker
+            # finishes; restore has already captured the linked referent.
+            def finish_migration(*args, **kwargs):
+                bm.run_profile_backup_tasks()
+                return True
+
+            monkeypatch.setattr(_bm_mod, "askUser", finish_migration)
+            bm.restore_backup(str(selected))
+        else:
+            # BackupBridge captures the resolved source before dispatching its
+            # QueryOp. Migration can finish before that queued worker starts.
+            bm.run_profile_backup_tasks()
+            result = bm.restore_backup(
+                str(selected),
+                interactive=False,
+                context=context,
+                source_file=source_file,
+            )
+            assert result["status"] == "staged", result
+
+        assert not legacy.exists()
+        migrated_selection = bm.backups_path / selected.name / "ankimon.db"
+        with closing(sqlite3.connect(migrated_selection)) as selected_db:
+            assert selected_db.execute(
+                "SELECT value FROM config WHERE key='trainer.name'"
+            ).fetchone() == ("Selected recovery",)
+        assert active.db_path == target
+        assert active.identity_token() == identity
+        pending = pending_import_info(target)
+        assert pending is not None, _bm_mod.showWarning.call_args_list
+        assert Path(pending["target"]) == target
+        with closing(sqlite3.connect(pending["pending_path"])) as staged:
+            assert staged.execute(
+                "SELECT value FROM config WHERE key='trainer.name'"
+            ).fetchone() == ("Selected recovery",)
+        assert active.get_config_value("trainer.name") == "Red"
+        _bm_mod.showWarning.assert_not_called()
+    finally:
+        cancel_pending_import(target)
+
+
+@pytest.mark.parametrize(
+    "unavailable",
+    [
+        pytest.param(
+            "linked",
+            marks=pytest.mark.skipif(
+                os.name == "nt", reason="symlinks need privileges"
+            ),
+        ),
+        "unwritable",
+    ],
+)
+def test_cancellation_context_survives_repeated_unavailable_backup_refresh(
+    mock_env, monkeypatch, tmp_path, unavailable
+):
+    bm, _, _, _ = mock_env
+    candidate = bm.backups_path
+    profile = candidate.parent
+    old_context = bm.capture_context()
+    if unavailable == "linked":
+        candidate.rmdir()
+        referent = tmp_path / "linked-backups"
+        referent.mkdir()
+        candidate.symlink_to(referent, target_is_directory=True)
+    else:
+        mkdir = Path.mkdir
+
+        def cannot_create(path, *args, **kwargs):
+            if path == candidate:
+                raise PermissionError("backup directory unavailable")
+            return mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", cannot_create)
+    bm.refresh_profile_path()
+    assert bm.backups_path is None
+    with pytest.raises(RuntimeError, match="changed"):
+        old_context.validate()
+    with pytest.raises(RuntimeError, match="Open an Anki profile"):
+        bm.capture_context()
+    context = bm.capture_context(require_backup_path=False)
+    for _ in range(3):
+        bm.refresh_profile_path()
+        context.validate()
+
+    # A real profile A -> B -> A change still retires the request even when
+    # the active save object/path is shared and A's backup directory is refused.
+    selected = [tmp_path / "another-profile"]
+    monkeypatch.setattr(bm, "_active_profile_folder", lambda: selected[0])
+    bm.refresh_profile_path()
+    selected[0] = profile
+    bm.refresh_profile_path()
+    with pytest.raises(RuntimeError, match="changed"):
+        context.validate()
+    current = bm.capture_context(require_backup_path=False)
+    bm.invalidate_context()
+    with pytest.raises(RuntimeError, match="changed"):
+        current.validate()

@@ -1292,7 +1292,7 @@ class BackupBridge(QObject):
             return {
                 "backups": worker_manager.get_backups(
                     include_inactive=True,
-                    active_filename=context.target.name,
+                    active_filename=context.source_filename,
                 ),
                 "path": str(context.backups_path),
                 "context": token,
@@ -1468,8 +1468,8 @@ class BackupBridge(QObject):
             resolved = self._validate_backup_path(backup_path)
             context = self._manager().capture_context()
             source_file = (
-                self._manager()._resolve_backup_path(resolved, context.target.name)
-                / context.target.name
+                self._manager()._resolve_backup_path(resolved, context.source_filename)
+                / context.source_filename
             ).resolve()
         except (ValueError, RuntimeError) as error:
             return {"ok": False, "error": str(error)}

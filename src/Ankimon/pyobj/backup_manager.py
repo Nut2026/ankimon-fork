@@ -31,7 +31,8 @@ class BackupContext:
     identity: tuple
     profile_epoch: int
     target: Path
-    backups_path: Path
+    source_filename: str
+    backups_path: Optional[Path]
 
     def validate(self):
         with self.manager._context_lock:
@@ -82,6 +83,7 @@ class BackupManager:
         self.user_files_path = user_path
         self.addon_path = addon_dir
         self.backups_path: Optional[Path] = None
+        self._profile_backup_candidate: Optional[Path] = None
         self._profile_work_lock = threading.RLock()
         self._context_lock = threading.RLock()
         self._profile_epoch = 0
@@ -413,15 +415,17 @@ class BackupManager:
         profile_folder = self._active_profile_folder()
         candidate = profile_folder / "Ankimon_Backups" if profile_folder else None
         with self._context_lock:
-            if candidate != self.backups_path:
+            if candidate != self._profile_backup_candidate:
                 self._profile_epoch += 1
                 self.backups_path = None
+                self._profile_backup_candidate = candidate
         if profile_folder is None:
             return
         if self._is_link(candidate):
             with self._context_lock:
-                self._profile_epoch += 1
-                self.backups_path = None
+                if self.backups_path is not None:
+                    self._profile_epoch += 1
+                    self.backups_path = None
             self.logger.log(
                 "error",
                 f"Refusing to activate linked backups directory: {candidate}",
@@ -431,8 +435,9 @@ class BackupManager:
             candidate.mkdir(parents=True, exist_ok=True)
         except Exception as error:
             with self._context_lock:
-                self._profile_epoch += 1
-                self.backups_path = None
+                if self.backups_path is not None:
+                    self._profile_epoch += 1
+                    self.backups_path = None
             self.logger.log("error", f"Failed to create backup directory: {error}")
             return
         with self._context_lock:
@@ -443,10 +448,11 @@ class BackupManager:
         with self._context_lock:
             self._profile_epoch += 1
 
-    def capture_context(self):
+    def capture_context(self, *, require_backup_path=True):
+        """Capture save ownership; cancelling imports needs no backup directory."""
         with self._context_lock:
             db = services.db
-            if db is None or self.backups_path is None:
+            if db is None or (require_backup_path and self.backups_path is None):
                 raise RuntimeError("Open an Anki profile before using Backup Manager.")
             identity = db.identity_token()
             return BackupContext(
@@ -455,6 +461,7 @@ class BackupManager:
                 identity,
                 self._profile_epoch,
                 Path(identity[0]).resolve(),
+                Path(identity[0]).name,
                 self.backups_path,
             )
 
@@ -635,6 +642,30 @@ class BackupManager:
                     backups.append(summary)
         return backups
 
+    def _reserve_backup_directory(self, destination, timestamp, deadline):
+        """Reserve a distinct staging name, including overlapping shutdown work."""
+        protected = self._migration_protected_paths()
+        name = f"backup_{timestamp}"
+        while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("the shutdown backup budget expired")
+            backup_dir = destination / name
+            staging_dir = destination / f".{name}"
+            if backup_dir not in protected and not os.path.lexists(backup_dir):
+                try:
+                    # mkdir is the reservation shared by all backup creators;
+                    # checking only the published directory races with workers.
+                    staging_dir.mkdir()
+                except FileExistsError:
+                    pass
+                else:
+                    # Another worker may have published after our first check,
+                    # freeing its staging name just before we reserved it.
+                    if not os.path.lexists(backup_dir):
+                        return backup_dir, staging_dir
+                    staging_dir.rmdir()
+            name = f"backup_{timestamp}_{uuid.uuid4().hex[:8]}"
+
     def create_backup(
         self,
         manual=False,
@@ -671,19 +702,13 @@ class BackupManager:
             context.validate()
         destination = context.backups_path if context is not None else self.backups_path
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        backup_dir = destination / f"backup_{timestamp}"
-        if backup_dir in self._migration_protected_paths():
-            backup_dir = backup_dir.with_name(
-                f"{backup_dir.name}_{uuid.uuid4().hex[:8]}"
-            )
-        staging_dir = destination / f".{backup_dir.name}"
 
         success = False
         created_directory = False
         try:
-            if backup_dir.exists():
-                raise FileExistsError(f"Backup already exists: {backup_dir.name}")
-            staging_dir.mkdir()
+            backup_dir, staging_dir = self._reserve_backup_directory(
+                destination, timestamp, deadline
+            )
             created_directory = True
 
             active_path = (
@@ -693,6 +718,13 @@ class BackupManager:
                 if services.db is not None
                 else None
             )
+            active_filename = (
+                context.source_filename
+                if context is not None
+                else active_path.name
+                if active_path is not None
+                else "ankimon.db"
+            )
             # For manual backups, only back up the currently active database.
             sources = {
                 name: self.user_files_path / name for name in self.FILES_TO_BACKUP
@@ -700,15 +732,15 @@ class BackupManager:
             if active_path is not None:
                 # Profiles can choose a different directory or filename. Never
                 # substitute the default save for the active file being protected.
+                # A symlink's logical filename identifies the account in backups;
+                # its resolved destination is only the source of snapshot bytes.
                 if manual:
-                    sources = {active_path.name: active_path}
+                    sources = {active_filename: active_path}
                 else:
-                    sources[active_path.name] = active_path
+                    sources[active_filename] = active_path
 
             completed = set()
-            needed = required_file or (
-                active_path.name if active_path else "ankimon.db"
-            )
+            needed = required_file or active_filename
             # A shared budget is spent on the file `success` depends on first,
             # so a locked companion database cannot starve the one that matters.
             order = (
@@ -1128,11 +1160,12 @@ class BackupManager:
             context = context or self.capture_context()
             context.validate()
             target = context.target
+            source_filename = context.source_filename
             source_file = (
                 source_file
                 or (
-                    self._resolve_backup_path(backup_path_str, target.name)
-                    / target.name
+                    self._resolve_backup_path(backup_path_str, source_filename)
+                    / source_filename
                 ).resolve()
             )
         except Exception as error:
@@ -1140,7 +1173,7 @@ class BackupManager:
                 showWarning(str(error))
                 return
             return {"status": "failed", "error": str(error)}
-        backup_path = self._resolve_backup_path(backup_path_str, target.name)
+        backup_path = self._resolve_backup_path(backup_path_str, source_filename)
         if not backup_path.is_dir():
             # Publication can complete between resolving and checking the row.
             backup_path = self._resolve_backup_path(backup_path_str)
@@ -1216,17 +1249,17 @@ class BackupManager:
                 validate_context()
                 backup_file = Path(source_file)
                 if not backup_file.is_file():
-                    # A confirmed source may have moved while a native dialog
-                    # was open. Follow only this manager's migration mapping;
-                    # keep the confirmed filename and account unchanged.
+                    # Migration may have moved a symlink's resolved source.
+                    # Follow the selected backup entry so its link retains the
+                    # source filename and any nested path, not a sibling save.
                     backup_file = (
-                        self._resolve_backup_path(backup_file.parent, target.name)
-                        / target.name
+                        self._resolve_backup_path(backup_path_str, source_filename)
+                        / source_filename
                     )
                 if not backup_file.is_file():
                     message = (
                         "The selected backup does not contain a backup for the active "
-                        f"database ({target.name})."
+                        f"database ({source_filename})."
                     )
                     if interactive:
                         showWarning(message)

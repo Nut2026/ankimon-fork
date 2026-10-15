@@ -163,7 +163,7 @@
     border: 1px solid var(--accent-blue);
     border-radius: 6px;
     padding: 5px 9px;
-    color: var(--text-bright);
+    color: #06111e;
     background: var(--accent-blue);
     cursor: pointer;
     font: 600 .72rem 'Outfit', sans-serif;
@@ -173,7 +173,7 @@
 
 .backup-actions button:hover {
     border-color: var(--accent-blue);
-    color: var(--text-bright);
+    color: #06111e;
 }
 
 .backup-actions button:disabled,
@@ -186,13 +186,13 @@
 .backup-actions .restore-btn {
     background: var(--accent-blue);
     border-color: var(--accent-blue);
-    color: var(--text-bright);
+    color: #06111e;
 }
 
 .backup-actions .delete-btn {
     background: var(--backup-danger);
     border-color: var(--backup-danger);
-    color: white;
+    color: #06111e;
 }
 
 #manual-backup-btn,

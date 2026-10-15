@@ -799,24 +799,16 @@ def _holds_kept_journals(folder: Optional[Path]) -> bool:
         return False
 
 
-def cancel_pending_save_import(notify=None) -> None:
-    """Cancel staged imports for either save mode, and report what was found."""
-    from ..events import events
+def _collect_import_cancellation(targets, validate=None):
+    """Return disk outcomes only; callers hold the staging transaction lock."""
     from ..save_import import (
         cancel_pending_import, pending_import_is_installed, pending_import_recovery_copy,
     )
 
-    def report(message, is_error=False):
-        if notify is not None:
-            notify(message, is_error)
-        elif is_error:
-            showWarning(message)
-        else:
-            showInfo(message)
-
     cancelled, already_installed, undetermined, failures = [], [], [], []
     without_copy, journals_kept = set(), set()
-    for target in _import_targets():
+    emitted = []
+    for target in targets:
         folder = None
         try:
             # Asked BEFORE cancelling: removing the manifest is what makes the
@@ -832,9 +824,11 @@ def cancel_pending_save_import(notify=None) -> None:
             # save: a move that went through before a later step failed leaves
             # nothing beside it, on this attempt and on the retry.
             folder = _import_recovery_folder(target)
+            if validate is not None:
+                validate()
             if not cancel_pending_import(target):
                 continue
-        except OSError as error:
+        except (OSError, RuntimeError) as error:
             kept = _KEPT_JOURNALS if _holds_kept_journals(folder) else ""
             failures.append(f"{target.name}: {error}{kept}")
             continue
@@ -845,8 +839,7 @@ def cancel_pending_save_import(notify=None) -> None:
             already_installed.append(target)
         elif installed is None:
             undetermined.append(target)
-        events.emit("save_import_cancelled", target=str(target),
-                    installed=installed)
+        emitted.append({"target": str(target), "installed": installed})
 
     # One line per save. Their outcomes can differ -- one import may already
     # have installed while the other was only pending, or one may cancel while
@@ -884,15 +877,93 @@ def cancel_pending_save_import(notify=None) -> None:
             # Another save may already be settled, its event emitted. Naming only
             # the failure would tell the user that did not happen.
             message += "\n\nMeanwhile:\n\n" + "\n\n".join(outcomes)
-        report(
-            message + "\n\nClose anything using the Ankimon folder and try again.",
-            True,
-        )
-        return
+        return {
+            "message": message + "\n\nClose anything using the Ankimon folder and try again.",
+            "is_error": True,
+            "events": emitted,
+        }
     if not outcomes:
-        report("There is no pending save import for either save mode.")
+        return {
+            "message": "There is no pending save import for either save mode.",
+            "is_error": False,
+            "events": emitted,
+        }
+    return {"message": "\n\n".join(outcomes), "is_error": False, "events": emitted}
+
+
+def _cancel_import_targets(targets, validate=None):
+    from ..save_import import _process_staging_lock
+
+    # Status and cancellation describe the same manifest. Acquiring this lock
+    # belongs on a worker: staging may be copying and verifying an entire save.
+    with _process_staging_lock():
+        if validate is not None:
+            validate()
+        return _collect_import_cancellation(targets, validate)
+
+
+def _report_import_cancellation(result, notify=None):
+    """Deliver events and notices on the caller's GUI thread."""
+    from ..events import events
+
+    for event in result["events"]:
+        events.emit("save_import_cancelled", **event)
+    if notify is not None:
+        notify(result["message"], result["is_error"])
+    elif result["is_error"]:
+        showWarning(result["message"])
+    else:
+        showInfo(result["message"])
+
+
+def cancel_pending_save_import(notify=None) -> None:
+    """Synchronous compatibility entry point; the native menu uses the worker."""
+    _report_import_cancellation(_cancel_import_targets(tuple(_import_targets())), notify)
+
+
+def cancel_pending_save_import_async(context, notify=None) -> None:
+    """Cancel captured saves on a worker without blocking Anki's menu or timers."""
+    from aqt.operations import QueryOp
+
+    # Capture paths before dispatch, while the originating profile is active.
+    # Duplicate menu clicks must not leave queued cancellations which could run
+    # after the user has prepared a replacement restore.
+    if getattr(context.manager, "_save_cancel_running", False):
         return
-    report("\n\n".join(outcomes))
+    context.validate()
+    targets = tuple(_import_targets())
+    context.manager._save_cancel_running = True
+
+    def current_notice(message, is_error=False):
+        try:
+            context.validate()
+            if notify is not None:
+                notify(message, is_error)
+            elif is_error:
+                showWarning(message)
+            else:
+                showInfo(message)
+        except Exception as error:
+            # Developer reload/profile close can destroy the originating view
+            # while disk work finishes. Never revive it or show stale notices.
+            _log_transfer_failure("could not show save cancellation outcome", error)
+
+    def done(result):
+        context.manager._save_cancel_running = False
+        _report_import_cancellation(result, current_notice)
+
+    def failed(error):
+        context.manager._save_cancel_running = False
+        current_notice(f"The pending save import could not be cancelled: {error}", True)
+
+    try:
+        QueryOp(
+            parent=mw,
+            op=lambda _col: _cancel_import_targets(targets, context.validate),
+            success=done,
+        ).failure(failed).without_collection().run_in_background()
+    except Exception as error:
+        failed(error)
 
 
 def browse_recovered_saves() -> None:
