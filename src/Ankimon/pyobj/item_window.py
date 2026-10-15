@@ -972,51 +972,60 @@ class ItemWindow(QWidget):
             )
             return False, 0
         try:
-            expected = services.db.get_main_pokemon()
-            if not expected or expected.get("individual_id") != main.individual_id:
-                saved = False
-            else:
-                candidate = copy.copy(main)
-                # Preserve the latest saved progress/metadata while retaining
-                # combat HP and status, which may be newer than the saved row.
-                candidate.update_stats(
-                    **{
-                        **expected,
-                        "hp": main.hp,
-                        "current_hp": main.current_hp,
-                        "battle_status": main.battle_status,
-                        "stat_stages": main.stat_stages,
-                        "volatile_status": main.volatile_status,
-                    }
+            try:
+                expected = services.db.get_main_pokemon()
+                if not expected or expected.get("individual_id") != main.individual_id:
+                    saved = False
+                else:
+                    candidate = copy.copy(main)
+                    # Preserve the latest saved progress/metadata while retaining
+                    # combat HP and status, which may be newer than the saved row.
+                    candidate.update_stats(
+                        **{
+                            **expected,
+                            "hp": main.hp,
+                            "current_hp": main.current_hp,
+                            "battle_status": main.battle_status,
+                            "stat_stages": main.stat_stages,
+                            "volatile_status": main.volatile_status,
+                        }
+                    )
+                    new_ev, granted = apply_ev_item(dict(candidate.ev), item_name)
+                    candidate.update_stats(ev=new_ev)
+                    candidate_data = candidate.to_dict()
+                    pokemon_data = {**expected, **candidate_data}
+                    saved = services.db.consume_item_and_save_main_pokemon(
+                        item_name, pokemon_data, expected_pokemon_data=expected
+                    )
+            except Exception as exc:
+                self.logger.log(
+                    "error", f"Could not train {main.name} with {item_name}: {exc}"
                 )
-                new_ev, granted = apply_ev_item(dict(candidate.ev), item_name)
-                candidate.update_stats(ev=new_ev)
-                candidate_data = candidate.to_dict()
-                pokemon_data = {**expected, **candidate_data}
-                saved = services.db.consume_item_and_save_main_pokemon(
-                    item_name, pokemon_data, expected_pokemon_data=expected
+                self.logger.log_and_showinfo(
+                    "error",
+                    f"Could not train {main.name}'s EVs. Your {item_name} and Pokémon "
+                    "were unchanged; please try again.",
                 )
-                if saved:
-                    main.update_stats(**candidate_data)
-        except Exception as exc:
-            self.logger.log(
-                "error", f"Could not train {main.name} with {item_name}: {exc}"
-            )
-            self.logger.log_and_showinfo(
-                "error",
-                f"Could not train {main.name}'s EVs. Your {item_name} and Pokémon "
-                "were unchanged; please try again.",
-            )
-            return False, 0
+                return False, 0
+            if not saved:
+                self.logger.log_and_showinfo(
+                    "info",
+                    f"Could not use {item_name}: the item is unavailable or the active "
+                    "Pokémon changed. Please refresh your bag and try again.",
+                )
+                return False, 0
+
+            # The save is durable. A publication failure must not be reported as
+            # a rejected spend; keep the mobile lock through this live update.
+            try:
+                main.update_stats(**candidate_data)
+            except Exception as exc:
+                self.logger.log(
+                    "warning",
+                    f"EV training was saved but the live Pokémon did not update: {exc}",
+                )
         finally:
             _mobile_sync_lock.release()
-        if not saved:
-            self.logger.log_and_showinfo(
-                "info",
-                f"Could not use {item_name}: the item is unavailable or the active "
-                "Pokémon changed. Please refresh your bag and try again.",
-            )
-            return False, 0
 
         self._refresh_ev_training_state(main, item_name, granted)
         self._refresh_bag()

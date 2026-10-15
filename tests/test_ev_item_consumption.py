@@ -405,6 +405,49 @@ def test_display_failure_does_not_report_committed_training_as_failed(item_windo
     assert db.quantity_calls == [("protein", -1)]
 
 
+@pytest.mark.parametrize("live_update_fails", [False, True])
+def test_live_publication_keeps_committed_result_and_mobile_lock(
+    item_window_mod, monkeypatch, live_update_fails
+):
+    """A committed spend stays successful even if publishing live stats fails."""
+    db = _FakeItemDB({"protein": 1})
+    pokemon = _FakePokemon()
+    win = _make_window(item_window_mod, db, pokemon)
+    lock = sys.modules["Ankimon.functions.mobile_sync"]._mobile_sync_lock
+    original_update = _FakePokemon.update_stats
+    live_updates = []
+
+    def update_stats(target, **data):
+        if target is pokemon:
+            # Mobile rewards must not publish between the commit and live update.
+            assert lock.locked()
+            assert db.saved_pokemon[0]["ev"]["atk"] == 10
+            live_updates.append(data)
+            if live_update_fails:
+                raise RuntimeError("live update unavailable")
+        return original_update(target, **data)
+
+    monkeypatch.setattr(_FakePokemon, "update_stats", update_stats)
+
+    assert win.dispatch_use("protein")["ok"] is True
+    assert len(live_updates) == 1
+    assert db.saved_pokemon[0]["ev"]["atk"] == 10
+    assert db.inventory.get("protein", 0) == 0
+    assert db.quantity_calls == [("protein", -1)]
+    assert not lock.locked()
+    win._refresh_ev_training_state.assert_called_once_with(pokemon, "protein", 10)
+    assert not any(
+        "were unchanged" in str(call)
+        for call in win.logger.log_and_showinfo.call_args_list
+    )
+    if live_update_fails:
+        win.logger.log.assert_any_call(
+            "warning",
+            "EV training was saved but the live Pokémon did not update: "
+            "live update unavailable",
+        )
+
+
 @pytest.mark.parametrize("current_hp", [0, 20, 100])
 def test_hp_training_refreshes_maximum_without_healing(item_window_mod, current_hp):
     db = _FakeItemDB({"health-candy-xl": 1})
