@@ -235,7 +235,15 @@ class Reviewer_Manager:
             saved_hp = saved["current_hp"]
             if isinstance(saved_hp, bool):
                 raise RuntimeError("Active Pokémon has invalid saved current_hp")
-            main_max = int(services.db._pokemon_max_hp(saved))
+            max_hp = services.db._pokemon_max_hp(saved)
+            if max_hp is None:
+                max_hp = getattr(self.main_pokemon, "max_hp", None)
+            try:
+                main_max = int(max_hp)
+            except (TypeError, ValueError, OverflowError):
+                main_max = 1
+            if main_max < 1:
+                main_max = 1
             main_hp = max(0, min(int(saved_hp), main_max))
             self.main_pokemon.max_hp = main_max
             self.main_pokemon.hp = main_hp
