@@ -560,6 +560,15 @@ class AnkimonDB:
 
     @classmethod
     def _pokemon_max_hp(cls, data):
+        """Return the computed max HP, or ``None`` when the record carries no
+        inputs to compute one.
+
+        A ``None`` return means "cannot trust any max": the caller must not
+        clamp a real ``current_hp`` against a fabricated fallback (doing so is
+        what turned a 75 HP record into a 1 HP record). Callers that need a
+        battle-ready max compute it themselves (PokemonObject fills it at
+        construction from ``base_stats``).
+        """
         level = cls._hp_integer(data.get("level")) or 5
         ev = data.get("ev") if isinstance(data.get("ev"), dict) else {}
         iv = data.get("iv") if isinstance(data.get("iv"), dict) else {}
@@ -581,7 +590,7 @@ class AnkimonDB:
 
         stats = data.get("stats")
         stats_hp = cls._hp_integer(stats.get("hp") if isinstance(stats, dict) else None)
-        return max(1, stats_hp or 1)
+        return stats_hp if stats_hp is not None else None
 
     @classmethod
     def _canonicalize_pokemon_hp(cls, data, *, allow_legacy_hp=False):
@@ -593,10 +602,13 @@ class AnkimonDB:
         saving a hand-built record would silently add ``current_hp: <max>``
         (and, when max HP itself is unknown, ``current_hp: 1``) to rows that
         never had HP -- including migration records that must be preserved
-        verbatim. Callers that need a battle-ready value compute it themselves
-        (PokemonObject fills max HP at construction); only
-        ``update_pokemon_current_hp`` and ``consume_item_and_save_main_pokemon``
-        may write it.
+        verbatim. When the record does carry an HP value but no inputs for a
+        real max, the caller's value is preserved (not clamped against a
+        fabricated fallback); clamping is only safe when the max is derivable
+        from ``base_stats`` or ``stats.hp``. Callers that need a battle-ready
+        value compute it themselves (PokemonObject fills max HP at
+        construction); only ``update_pokemon_current_hp`` and
+        ``consume_item_and_save_main_pokemon`` may write it.
         """
         if not isinstance(data, dict):
             raise TypeError("Pokémon data must be a dictionary")
@@ -618,7 +630,10 @@ class AnkimonDB:
         if current_hp is None:
             return result
         max_hp = cls._pokemon_max_hp(result)
-        result["current_hp"] = max(0, min(current_hp, max_hp))
+        if max_hp is None:
+            result["current_hp"] = max(0, current_hp)
+        else:
+            result["current_hp"] = max(0, min(current_hp, max_hp))
         return result
 
     def _normalize_captured_pokemon_hp(self):
@@ -1366,6 +1381,9 @@ class AnkimonDB:
                 )
                 if is_valid_base_stats(base_stats):
                     pokemon_data["base_stats"] = base_stats
+                    pokemon_data = self._canonicalize_pokemon_hp(
+                        pokemon_data, allow_legacy_hp=True
+                    )
                     new_obfuscated = self._obfuscate(pokemon_data)
                     updates.append((new_obfuscated, ind_id))
 
@@ -1716,7 +1734,10 @@ class AnkimonDB:
                 raise ValueError(f"Invalid saved Pokémon data for {individual_id}")
             data = self._canonicalize_pokemon_hp(data)
             max_hp = self._pokemon_max_hp(data)
-            data["current_hp"] = max(0, min(hp, max_hp))
+            if max_hp is None:
+                data["current_hp"] = max(0, hp)
+            else:
+                data["current_hp"] = max(0, min(hp, max_hp))
             cursor.execute(
                 "UPDATE captured_pokemon SET data = ? WHERE individual_id = ?",
                 (self._obfuscate(data), individual_id),
@@ -2793,8 +2814,7 @@ class AnkimonDB:
         """Import legacy saves through the same verified path as the upgrade dialog.
 
         Optional callbacks report ``progress(percent, message)`` and cancellation.
-        The result contains counts plus ``errors``/``cancelled`` on an incomplete
-        import. Only a verified import sets the migration completion markers.
+        The result contains counts plus ``errors``/``cancelled`` on an incomplete        import. Only a verified import sets the migration completion markers.
         """
         from .legacy_migration import LegacyMigration
 
