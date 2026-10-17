@@ -829,7 +829,13 @@ class ProfileData:
                 if not services.db.set_main_pokemon(companion_id):
                     raise RuntimeError("The selected companion was not found")
                 from ..functions.update_main_pokemon import update_main_pokemon
-                update_main_pokemon(services.main_pokemon)
+                new_main, mainpokemon_empty = update_main_pokemon(
+                    services.main_pokemon
+                )
+                if new_main is not None and new_main is not services.main_pokemon:
+                    services.main_pokemon.update_stats(**new_main.to_dict())
+                if mainpokemon_empty:
+                    raise RuntimeError("The selected companion could not be loaded")
                 if services.reviewer is not None:
                     services.reviewer.refresh_hud()
         except Exception as e:
