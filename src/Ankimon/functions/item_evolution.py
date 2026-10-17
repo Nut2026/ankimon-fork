@@ -81,6 +81,7 @@ def save_item_evolution(db, expected_pokemon, evolved_pokemon, item_name) -> boo
     ):
         return False
     species_ids = (int(expected_pokemon["id"]), int(evolved_pokemon["id"]))
+    evolved_pokemon = db._canonicalize_pokemon_hp(evolved_pokemon)
     evolved_data = db._obfuscate(evolved_pokemon)
 
     deadline = time.monotonic() + _LOCK_TOTAL_BUDGET_S
@@ -135,7 +136,6 @@ def _write_evolution(
     db, conn, individual_id, expected_pokemon, evolved_data, item_name, species_ids
 ) -> bool:
     """Write the evolution, item charge, and history in one transaction."""
-    evolved_data = db._canonicalize_pokemon_hp(evolved_data)
     # Acquire the cursor before BEGIN; raw execution cannot replay on a new connection.
     with conn.cursor() as cursor, _immediate_transaction(conn):
         cursor.execute(
