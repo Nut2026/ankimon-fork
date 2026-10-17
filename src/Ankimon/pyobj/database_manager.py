@@ -585,13 +585,28 @@ class AnkimonDB:
 
     @classmethod
     def _canonicalize_pokemon_hp(cls, data, *, allow_legacy_hp=False):
-        """Return a captured-Pokemon record with only authoritative current HP."""
+        """Return a captured-Pokemon record with only authoritative current HP.
+
+        A record that carries no HP information is returned unchanged (save for
+        dropping a legacy top-level ``hp`` key). This is load-bearing: the
+        persistence layer must not invent a ``current_hp`` out of max HP, or
+        saving a hand-built record would silently add ``current_hp: <max>``
+        (and, when max HP itself is unknown, ``current_hp: 1``) to rows that
+        never had HP -- including migration records that must be preserved
+        verbatim. Callers that need a battle-ready value compute it themselves
+        (PokemonObject fills max HP at construction); only
+        ``update_pokemon_current_hp`` and ``consume_item_and_save_main_pokemon``
+        may write it.
+        """
         if not isinstance(data, dict):
             raise TypeError("Pokémon data must be a dictionary")
         result = dict(data)
-        max_hp = cls._pokemon_max_hp(result)
         current_hp = None
-        keys = ("current_hp", "hp", "stats") if allow_legacy_hp else ("current_hp", "stats")
+        keys = (
+            ("current_hp", "hp", "stats")
+            if allow_legacy_hp
+            else ("current_hp", "stats")
+        )
         for key in keys:
             candidate = result.get(key)
             if key == "stats" and isinstance(candidate, dict):
@@ -600,7 +615,10 @@ class AnkimonDB:
             if current_hp is not None:
                 break
         result.pop("hp", None)
-        result["current_hp"] = max(0, min(current_hp if current_hp is not None else max_hp, max_hp))
+        if current_hp is None:
+            return result
+        max_hp = cls._pokemon_max_hp(result)
+        result["current_hp"] = max(0, min(current_hp, max_hp))
         return result
 
     def _normalize_captured_pokemon_hp(self):
