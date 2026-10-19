@@ -2332,9 +2332,16 @@ class AnkimonDB:
                         (individual_id,),
                     )
                     current = cursor.fetchone()
+                    current_data = (
+                        self._canonicalize_pokemon_hp(
+                            self._deobfuscate(current[0])
+                        )
+                        if current is not None
+                        else None
+                    )
                     if current is None or (
                         expected_pokemon_data is not None
-                        and self._deobfuscate(current[0]) != expected_pokemon_data
+                        and current_data != expected_pokemon_data
                     ):
                         conn.rollback()
                         return False
