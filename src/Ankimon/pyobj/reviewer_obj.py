@@ -271,21 +271,11 @@ class Reviewer_Manager:
                     "error", f"Could not read reviewer HP from database: {exc}"
                 )
 
-        if not saved:
-            if services.logger is not None:
-                services.logger.log(
-                    "error",
-                    "Could not read reviewer HP from database: "
-                    "Active Pokémon has no saved row",
-                )
-            reviewer.web.eval(
-                "if(window.__ankimonHud) window.__ankimonHud.clear();"
-            )
-            self._last_state = None
-            return
-
-        max_hp = services.db._pokemon_max_hp(saved)
-        if max_hp is None:
+        if saved:
+            max_hp = services.db._pokemon_max_hp(saved)
+            if max_hp is None:
+                max_hp = getattr(self.main_pokemon, "max_hp", None)
+        else:
             max_hp = getattr(self.main_pokemon, "max_hp", None)
         try:
             main_max = int(max_hp)
@@ -297,7 +287,7 @@ class Reviewer_Manager:
         live_hp = getattr(self.main_pokemon, "current_hp", None)
         if live_hp is None:
             live_hp = getattr(self.main_pokemon, "hp", None)
-        if live_hp is None:
+        if live_hp is None and saved:
             live_hp = saved.get("current_hp")
         if isinstance(live_hp, bool) or live_hp is None:
             if services.logger is not None:
@@ -331,7 +321,7 @@ class Reviewer_Manager:
         self.main_pokemon.hp = main_hp
         self.main_pokemon.current_hp = main_hp
 
-        if individual_id:
+        if saved and individual_id:
             self._persist_live_hp(individual_id, saved, main_hp, main_max)
 
         main_hp, main_max_hp = self._safe_hp_pair(main_hp, main_max)
