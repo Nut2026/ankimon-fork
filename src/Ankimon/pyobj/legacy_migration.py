@@ -10,6 +10,7 @@ from pathlib import Path
 from .database_manager import (
     aggregate_legacy_items,
     canonical_pokemon_name,
+    canonicalize_pokemon_record,
     find_matching_captured,
     is_valid_individual_id,
     legacy_species_id,
@@ -186,19 +187,17 @@ class LegacyMigration:
     def canonical_expected_pokemon(self, pokemon):
         """Build the record the database is expected to read back.
 
-        #975 makes ``save_pokemon`` canonicalise HP data: the persisted row
-        carries ``current_hp`` and drops the legacy top-level ``hp``. The
-        migration must therefore compare the read-back against this canonical
-        form, never against the raw source dict, or every legacy HP entry
-        fails verification and rolls back.
+        Delegates to ``database_manager.canonicalize_pokemon_record`` — the
+        same helper ``save_pokemon`` and every public read path use — so the
+        migration's expectation can never drift from the persisted shape.
+        ``allow_legacy_hp=True`` accepts the legacy top-level ``hp`` that
+        older JSON carries and folds it into ``current_hp`` (the saved row
+        never keeps ``hp``); ``_pokemon_max_hp`` clamping and the ``stats.hp``
+        fallback are applied by the same call, matching the read path exactly.
         """
         if not isinstance(pokemon, dict):
             return pokemon
-        canonical = dict(pokemon)
-        hp = canonical.pop("hp", None)
-        if "current_hp" not in canonical or canonical.get("current_hp") is None:
-            canonical["current_hp"] = hp
-        return canonical
+        return canonicalize_pokemon_record(pokemon, allow_legacy_hp=True)
 
     def read_back_matches(self, individual_id, expected):
         saved = self.db.get_pokemon(individual_id)
