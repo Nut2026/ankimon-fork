@@ -546,7 +546,7 @@ class AnkimonDB:
         self._connection_epoch = 0
         self._connection_epoch_gui = -1
         self._setup_database()
-        self._normalize_captured_pokemon_hp()
+        self._normalize_captured_pokemon_hp_safely()
         self._reconcile_pokedex_history_safely()
 
     @staticmethod
@@ -635,6 +635,19 @@ class AnkimonDB:
         else:
             result["current_hp"] = max(0, min(current_hp, max_hp))
         return result
+
+    def _normalize_captured_pokemon_hp_safely(self):
+        """``_normalize_captured_pokemon_hp`` that can never stop the DB from opening.
+
+        Mirrors ``_reconcile_pokedex_history_safely``: a locked database or a
+        SQLite error during this one-off sweep must not fail the constructor
+        (which would stop the add-on from loading inside Anki). The sweep is
+        idempotent, so it simply runs again on the next launch.
+        """
+        try:
+            self._normalize_captured_pokemon_hp()
+        except Exception as e:
+            self._log("error", f"Failed to normalize captured Pokémon HP: {e}")
 
     def _normalize_captured_pokemon_hp(self):
         """Migrate legacy duplicate HP fields and clamp saved current HP."""
@@ -1126,11 +1139,22 @@ class AnkimonDB:
             self._connection = None
             try:
                 self._setup_database()
+                # Legacy rows in the newly selected save may still carry the old
+                # duplicate HP fields. The constructor-only sweep does not run on
+                # this path, so canonicalise now — otherwise the healing /
+                # EV-item / item-evolution CAS checks (which compare a
+                # canonicalised snapshot against the raw stored row) reject
+                # unchanged legacy records. Safe wrapper: a locked DB here must
+                # not abort the switch after setup already succeeded.
+                self._normalize_captured_pokemon_hp_safely()
             except Exception:
                 self.db_path = old_path
                 self._connection = None
                 try:
                     self._setup_database()
+                    # Restoration must also canonicalise, for the same reason as
+                    # the forward path above.
+                    self._normalize_captured_pokemon_hp_safely()
                 except Exception as restore_error:
                     self._log(
                         "error",
@@ -1494,6 +1518,15 @@ class AnkimonDB:
                         (individual_id,),
                     ).fetchone()
                 pokemon = self._deobfuscate(row["data"]) if row else None
+                if isinstance(pokemon, dict):
+                    # Canonicalise the same way get_pokemon() /
+                    # get_main_pokemon() do, so the reward's snapshot matches
+                    # callers' expected snapshots even when the stored row is a
+                    # legacy record with ``hp`` but no ``current_hp``. Without
+                    # this, a subsequent CAS (healing / EV item / item
+                    # evolution) would see a non-canonical stored row and
+                    # reject an unchanged Pokémon.
+                    pokemon = self._canonicalize_pokemon_hp(pokemon)
                 if (
                     not isinstance(pokemon, dict)
                     or pokemon.get("individual_id") != individual_id
@@ -1576,7 +1609,13 @@ class AnkimonDB:
                         (individual_id,),
                     ).fetchone()
                     current = self._deobfuscate(row["data"]) if row else None
-                    if not isinstance(current, dict):
+                    if isinstance(current, dict):
+                        # Match the canonical form callers compare against (see
+                        # get_pokemon()). A legacy ``hp``-only row would otherwise
+                        # fail the species/moveset CAS below despite being
+                        # unchanged.
+                        current = self._canonicalize_pokemon_hp(current)
+                    else:
                         current = None
                     stored_attacks = current.get("attacks") if current else None
                     if isinstance(stored_attacks, str):
