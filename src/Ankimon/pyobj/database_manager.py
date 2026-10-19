@@ -501,6 +501,34 @@ def find_matching_captured(
     return None
 
 
+def canonicalize_pokemon_record(
+    data: Dict[str, Any], *, allow_legacy_hp: bool = False
+) -> Dict[str, Any]:
+    """Return the canonical form of a captured-Pokemon record.
+
+    #975 makes ``save_pokemon`` / ``save_main_pokemon`` / every read path
+    canonicalise HP data: a legacy top-level ``hp`` is dropped, the
+    authoritative value is written to ``current_hp``, and the value is
+    clamped to the record's own derivable max HP. This module-level helper is
+    the single source of truth for that transformation.
+
+    ``legacy_migration.py`` MUST build its read-back expectation with this
+    function rather than reimplementing the shape: the migration compares a
+    just-saved row against an expected record, and if the two sides disagree
+    by even one key (e.g. the migration keeps ``hp``, the save drops it) every
+    migrated entry fails verification and rolls back.
+
+    ``allow_legacy_hp=True`` lets a caller accept an incoming ``hp`` key as the
+    source of ``current_hp`` (used by the migration and the startup sweep);
+    the saved row never contains ``hp`` either way. ``allow_legacy_hp=False``
+    (the default, and what every public save/read path uses) ignores ``hp``
+    and only reads ``current_hp`` / ``stats.hp`` — so an in-memory caller that
+    hands ``save_pokemon`` an ``hp``-only record gets a row without HP, which
+    is the documented #975 contract.
+    """
+    return AnkimonDB._canonicalize_pokemon_hp(data, allow_legacy_hp=allow_legacy_hp)
+
+
 class AnkimonDB:
     """Handles all database operations for Ankimon. Stores data in SQLite."""
 
