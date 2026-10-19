@@ -916,7 +916,16 @@ class ItemWindow(QWidget):
                 "error", "The active Pokémon has invalid saved HP; no item was used."
             )
             return False
-        max_hp = int(db._pokemon_max_hp(expected))
+        max_hp = db._pokemon_max_hp(expected)
+        if max_hp is None:
+            max_hp = getattr(self.main_pokemon, "max_hp", None)
+        try:
+            max_hp = int(max_hp)
+        except (TypeError, ValueError, OverflowError):
+            self.logger.log_and_showinfo(
+                "error", "The active Pokémon has no valid maximum HP; no item was used."
+            )
+            return False
         current_hp = max(0, min(current_hp, max_hp))
         if current_hp == 0:
             self.logger.log_and_showinfo(
