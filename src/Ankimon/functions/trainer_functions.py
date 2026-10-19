@@ -6,7 +6,7 @@ from .pokedex_functions import check_evolution_for_pokemon, return_name_for_id
 from .friendship_evolution import check_friendship_evolution_for_pokemon
 from .learnset_retrieval import get_levelup_move_for_pokemon
 from .drawing_utils import tooltipWithColour
-from ..move_names import format_move_name
+from ..move_names import format_move_name, normalize_move_id
 from ..services import services
 
 MAX_MOVES = 4
@@ -48,7 +48,7 @@ def _learn_levelup_moves(logger, pokemon, start_level, end_level):
     logger : ShowInfoLogger
         Logger used for the learn / discard messages.
     pokemon : dict
-        Stored Pokemon record; ``pokemon["attacks"]`` is updated in place.
+        Committed Pokemon record; only its attacks are updated in the database.
         Left untouched (and nothing is learned) when it is not a list of move
         ids, so a corrupt record can never be overwritten by this step.
     start_level : int
@@ -61,6 +61,9 @@ def _learn_levelup_moves(logger, pokemon, start_level, end_level):
     None
     """
     display_name = str(pokemon.get("name", "")).capitalize()
+    db = services.db
+    db_identity = db.identity_token()
+    expected_pokemon = dict(pokemon)
     attacks = pokemon.get("attacks")
     if isinstance(attacks, str):
         try:
@@ -68,16 +71,17 @@ def _learn_levelup_moves(logger, pokemon, start_level, end_level):
         except Exception:
             attacks = None
     if not isinstance(attacks, list) or not all(isinstance(m, str) for m in attacks):
-        # Never rebuild a moveset we cannot read: the record is saved right
-        # after this, and a bad guess here would overwrite the stored moves.
+        # Never rebuild a moveset we cannot read. The reward is already saved,
+        # and a bad guess here would overwrite the stored moves.
         logger.log(
             "error",
             f"Skipping level-up moves for {display_name}: stored attacks are not a list of move ids ({pokemon.get('attacks')!r}).",
         )
         return
     attacks = list(attacks)
+    original_attacks = list(attacks)
 
-    # A learnset failure must never block the XP reward saved after this.
+    # A learnset failure must not affect the already committed XP reward.
     try:
         new_attacks = _collect_new_levelup_moves(
             str(pokemon.get("name", "")).lower(), attacks, start_level, end_level
@@ -90,11 +94,59 @@ def _learn_levelup_moves(logger, pokemon, start_level, end_level):
     if not new_attacks:
         return
 
-    learned = []
+    # A legacy four-slot record may contain fewer than four actual moves.
+    # If even the complete offered pool cannot fill four distinct slots, teach
+    # it automatically instead of opening a dialog that can never confirm.
+    if len({_normalize_move_id(move) for move in attacks + new_attacks}) < MAX_MOVES:
+        unique = {}
+        for move in attacks:
+            unique.setdefault(_normalize_move_id(move), move)
+        attacks = list(unique.values())
+
     while new_attacks and len(attacks) < MAX_MOVES:
         move = new_attacks.pop(0)
         attacks.append(move)
-        learned.append(move)
+    if new_attacks:
+        if _in_bulk_resolve():
+            # Never pop a dialog while replaying a bulk backlog; the moves are
+            # still reachable via Remember Attacks.
+            logger.log(
+                "info",
+                f"[Bulk Resolve] Discarded learning new moves {new_attacks} on {display_name}.",
+            )
+        else:
+            attacks = _choose_moveset_or_keep(
+                logger, display_name, attacks, new_attacks
+            )
+
+    if attacks == original_attacks:
+        return
+    if services.db is not db or db.identity_token() != db_identity:
+        logger.log(
+            "warning", f"Skipping moveset update for {display_name}: save changed."
+        )
+        return
+    # The modal runs a nested event loop. Patch the current row under the
+    # database writer lock, retaining any rewards or other edits made meanwhile.
+    updated = db.update_pokemon_attacks(
+        pokemon["individual_id"],
+        expected_pokemon,
+        attacks,
+        expected_db_identity=db_identity,
+    )
+    if updated is None:
+        logger.log(
+            "warning",
+            f"Skipping stale moveset choice for {display_name}; use Remember Attacks to teach the moves later.",
+        )
+        return
+    pokemon.update(updated)
+    original_ids = {_normalize_move_id(move) for move in original_attacks}
+    learned = [
+        move
+        for move in updated["attacks"]
+        if _normalize_move_id(move) not in original_ids
+    ]
     if learned:
         msg = _translate(
             "mainpokemon_learned_new_attack",
@@ -105,19 +157,6 @@ def _learn_levelup_moves(logger, pokemon, start_level, end_level):
         logger.log("info", msg)
         if not _in_bulk_resolve():
             tooltipWithColour(msg, LEVEL_UP_COLOR)
-
-    if new_attacks:
-        if _in_bulk_resolve():
-            # Never pop a dialog while replaying a bulk backlog; the moves are
-            # still reachable via Remember Attacks.
-            logger.log(
-                "info",
-                f"[Bulk Resolve] Discarded learning new moves {new_attacks} on {display_name}.",
-            )
-        else:
-            attacks = _choose_moveset_or_keep(logger, display_name, attacks, new_attacks)
-
-    pokemon["attacks"] = attacks
 
 
 def _normalize_move_id(move):
@@ -133,7 +172,7 @@ def _normalize_move_id(move):
     str
         Lower-cased id with spaces and hyphens removed.
     """
-    return str(move).lower().replace(" ", "").replace("-", "")
+    return normalize_move_id(move)
 
 
 def _collect_new_levelup_moves(name, attacks, start_level, end_level):
@@ -206,28 +245,46 @@ def _apply_moveset_choice(attacks, new_attacks, chosen):
     Returns
     -------
     list of str or None
-        The new moveset, with retained moves keeping their slots and the
-        selected new moves filling the vacated slots in candidate order;
-        None if ``chosen`` is not exactly ``MAX_MOVES`` unique ids from the
-        offered pool.
+        Exactly the selected moves, with each retained move keeping its first
+        slot in the first ``MAX_MOVES`` slots. Selected new moves fill vacancies
+        in candidate order, followed by any selected current moves beyond those
+        slots. None if ``chosen`` is not exactly ``MAX_MOVES`` distinct move
+        identities from the offered pool.
     """
     if not isinstance(chosen, (list, tuple)):
         return None
     chosen = list(chosen)
-    pool = set(attacks) | set(new_attacks)
-    if len(chosen) != MAX_MOVES or len(set(chosen)) != MAX_MOVES:
+    if len(chosen) != MAX_MOVES or not all(isinstance(m, str) for m in chosen):
         return None
-    if not set(chosen) <= pool:
+    if not isinstance(attacks, (list, tuple)) or not isinstance(
+        new_attacks, (list, tuple)
+    ):
         return None
-    incoming = [m for m in new_attacks if m in chosen]
-    result = []
-    for move in attacks:
-        if move in chosen:
-            result.append(move)
-        elif incoming:
-            result.append(incoming.pop(0))
-    result.extend(incoming)
-    return result[:MAX_MOVES]
+    offered = list(attacks) + list(new_attacks)
+    if not all(isinstance(m, str) for m in offered) or not set(chosen) <= set(offered):
+        return None
+    selected = {_normalize_move_id(move): move for move in chosen}
+    if len(selected) != MAX_MOVES:
+        return None
+
+    # A repeated stored move owns only its first slot. Reserve all retained
+    # slots before filling holes, so a new move cannot displace a later one.
+    remaining = set(selected)
+    result = [None] * MAX_MOVES
+    for slot, move in enumerate(attacks[:MAX_MOVES]):
+        key = _normalize_move_id(move)
+        if key in remaining:
+            result[slot] = selected[key]
+            remaining.remove(key)
+
+    incoming = []
+    for move in list(new_attacks) + list(attacks):
+        key = _normalize_move_id(move)
+        if key in remaining:
+            incoming.append(selected[key])
+            remaining.remove(key)
+    incoming = iter(incoming)
+    return [next(incoming) if move is None else move for move in result]
 
 
 def _choose_moveset_or_keep(logger, display_name, attacks, new_attacks):
@@ -271,7 +328,7 @@ def _choose_moveset_or_keep(logger, display_name, attacks, new_attacks):
             f"Ignoring invalid moveset choice {chosen!r} for {display_name}; keeping current moves.",
         )
         return attacks
-    logger.log("info", f"{display_name}'s moves are now {applied}")
+    logger.log("info", f"Selected moves for {display_name}: {applied}")
     return applied
 
 
@@ -389,77 +446,85 @@ def _grant_xp_to_pokemon(logger, settings_obj, evo_window, individual_id, exp):
     no longer exists (released/traded since it was selected/added to the
     team), True otherwise."""
     db = services.db
+    db_identity = db.identity_token()
     remove_level_cap = settings_obj.get("misc.remove_level_cap")
 
     msg = ""
     evolution_triggered = False
 
-    pokemon = db.get_pokemon(individual_id)
-    if pokemon is None:
-        return False
-    # Classic XP Share can round a one-point reward down to zero. A recipient
-    # that earns no XP must not gain friendship or trigger an evolution.
+    # Zero rewards do not write or trigger friendship/evolution.
     if exp <= 0:
-        return True
+        return db.get_pokemon(individual_id) is not None
+    # Serialize the reward itself as well as the later moveset patch. No modal
+    # may open inside this transaction.
+    with db.pokemon_reward_transaction(
+        individual_id, expected_db_identity=db_identity
+    ) as pokemon:
+        if pokemon is None:
+            return False
+        current_level = int(pokemon["level"])  # MODIFIED: Use local variable for level
+        if pokemon.get("held_item") == "lucky-egg":
+            exp = int(exp * 1.5)  # Multiply by 1.5 if pokemon holds lucky egg
+            msg += f"{pokemon['name']}'s Lucky Egg boosts its XP gained!\n"
+        current_xp = pokemon.get("xp") or pokemon.get("stats", {}).get("xp", 0)
+        growth_rate = pokemon[
+            "growth_rate"
+        ]  # MODIFIED: Use local variable for growth rate
+        experience_needed = int(
+            find_experience_for_level(growth_rate, current_level, remove_level_cap)
+        )  # MODIFIED: Pre-calculate needed XP
+        evo_id = None  # Initialize variable
 
-    current_level = int(pokemon["level"])  # MODIFIED: Use local variable for level
-    if pokemon.get("held_item") == "lucky-egg":
-        exp = int(exp * 1.5)  # Multiply by 1.5 if pokemon holds lucky egg
-        msg += f"{pokemon['name']}'s Lucky Egg boosts its XP gained!\n"
-    current_xp = pokemon.get("xp") or pokemon.get("stats", {}).get("xp", 0)
-    growth_rate = pokemon["growth_rate"]  # MODIFIED: Use local variable for growth rate
-    experience_needed = int(
-        find_experience_for_level(growth_rate, current_level, remove_level_cap)
-    )  # MODIFIED: Pre-calculate needed XP
-    evo_id = None  # Initialize variable
-
-    levels_gained = 0
-    logger.log("info", "Running XP share function")
-    if experience_needed > exp + current_xp:
-        pokemon["xp"] = current_xp + exp
-    else:
-        while exp + current_xp > experience_needed:
-            if remove_level_cap or current_level < 100:
-                if levels_gained >= 10:
-                    logger.log(
-                        "error",
-                        f"XP Share level-up loop exceeded safety cap of 10 for {pokemon['name']}",
-                    )
-                    exp = max(0, experience_needed - 1)
+        levels_gained = 0
+        logger.log("info", "Running XP share function")
+        if experience_needed > exp + current_xp:
+            pokemon["xp"] = current_xp + exp
+        else:
+            while exp + current_xp > experience_needed:
+                if remove_level_cap or current_level < 100:
+                    if levels_gained >= 10:
+                        logger.log(
+                            "error",
+                            f"XP Share level-up loop exceeded safety cap of 10 for {pokemon['name']}",
+                        )
+                        exp = max(0, experience_needed - 1)
+                        current_xp = 0
+                        break
+                    levels_gained += 1
+                    current_level += 1
+                    exp = exp + current_xp - experience_needed
                     current_xp = 0
+                    experience_needed = int(
+                        find_experience_for_level(
+                            growth_rate, current_level, remove_level_cap
+                        )
+                    )  # MODIFIED: Recalculate needed XP
+                    msg += f"XP increased for {pokemon['name']} with level {current_level} and XP {exp}\n"
+                else:
                     break
-                levels_gained += 1
-                current_level += 1
-                exp = exp + current_xp - experience_needed
-                current_xp = 0
-                experience_needed = int(
-                    find_experience_for_level(
-                        growth_rate, current_level, remove_level_cap
-                    )
-                )  # MODIFIED: Recalculate needed XP
-                msg += f"XP increased for {pokemon['name']} with level {current_level} and XP {exp}\n"
-            else:
-                break
-        pokemon["level"] = current_level
-        pokemon["xp"] = 0 if exp < 0 else exp
-        # Learn moves before the save and the evolution check below, so the
-        # new moves persist with the level-up and a move-based evolution sees
-        # them on this very level (same ordering as the active Pokemon).
-        if levels_gained > 0:
+            pokemon["level"] = current_level
+            pokemon["xp"] = 0 if exp < 0 else exp
+
+        # Passive XP Share earns less friendship than battling; neither is capped.
+        friendship_gain = random.randint(1, 2)
+        if pokemon.get("held_item") == "soothe-bell":
+            friendship_gain = int(friendship_gain * 1.5)
+        pokemon["friendship"] = pokemon.get("friendship", 0) + friendship_gain
+
+    if levels_gained > 0:
+        try:
             _learn_levelup_moves(
                 logger, pokemon, current_level - levels_gained, current_level
             )
-
-    # Passive XP Share earns less friendship than battling; neither is capped.
-    friendship_gain = random.randint(1, 2)
-    if pokemon.get("held_item") == "soothe-bell":
-        friendship_gain = int(friendship_gain * 1.5)
-    pokemon["friendship"] = pokemon.get("friendship", 0) + friendship_gain
-
-    # Prompts read the stored record and may synchronously evolve it. Commit
-    # progress first, so a failed prompt cannot lose the reward and a completed
-    # evolution cannot be overwritten with this pre-evolution snapshot.
-    db.save_pokemon(pokemon)
+        except Exception as error:
+            logger.log(
+                "error", f"XP Share move learning failed for {individual_id}: {error}"
+            )
+        if services.db is not db or db.identity_token() != db_identity:
+            return True
+        pokemon = db.get_pokemon(individual_id)
+        if pokemon is None:
+            return False
 
     # Check for evolution
     evo_id = check_evolution_for_pokemon(
@@ -522,7 +587,9 @@ def _grant_xp_to_pokemon(logger, settings_obj, evo_window, individual_id, exp):
     return True
 
 
-def xp_share_gain_exp(logger, settings_obj, evo_window, main_pokemon_id, exp, xp_share_individual_id):
+def xp_share_gain_exp(
+    logger, settings_obj, evo_window, main_pokemon_id, exp, xp_share_individual_id
+):
     """Grant XP Share's cut of ``exp``. Two modes, picked by
     ``trainer.xp_share_mode`` (default "classic" — never silently changes
     behavior for existing saves):
@@ -540,11 +607,15 @@ def xp_share_gain_exp(logger, settings_obj, evo_window, main_pokemon_id, exp, xp
     mode = settings_obj.get("trainer.xp_share_mode", "classic")
 
     if mode == "oras":
+        db = services.db
         try:
-            team_rows = services.db.get_team() or []
+            db_identity = db.identity_token()
+            team_rows = db.get_team() or []
         except Exception:
             team_rows = []
         for row in team_rows:
+            if services.db is not db or db.identity_token() != db_identity:
+                break
             ind_id = row.get("individual_id")
             if not ind_id or ind_id == main_pokemon_id:
                 continue
@@ -567,5 +638,7 @@ def xp_share_gain_exp(logger, settings_obj, evo_window, main_pokemon_id, exp, xp
         logger.log("info", "XP Share target no longer exists; cleared the setting.")
         return original_exp
 
-    _grant_xp_to_pokemon(logger, settings_obj, evo_window, xp_share_individual_id, half_exp)
+    _grant_xp_to_pokemon(
+        logger, settings_obj, evo_window, xp_share_individual_id, half_exp
+    )
     return original_exp
