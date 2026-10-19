@@ -143,7 +143,13 @@ def _write_evolution(
             (individual_id,),
         )
         row = cursor.fetchone()
-        if row is None or db._deobfuscate(row["data"]) != expected_pokemon:
+        if row is None:
+            return False
+        current = db._deobfuscate(row["data"])
+        current = (
+            db._canonicalize_pokemon_hp(current) if isinstance(current, dict) else None
+        )
+        if current != expected_pokemon:
             return False
 
         cursor.execute(
