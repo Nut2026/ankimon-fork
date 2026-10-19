@@ -617,17 +617,24 @@ class EvoWindow(QWidget):
             pokemon["base_stats"] = base_stats
             pokemon["stats"] = base_stats
             pokemon["xp"] = 0
-            try:
-                saved_current_hp = max(0, int(pokemon.get("current_hp", 0)))
-            except (TypeError, ValueError, OverflowError):
-                saved_current_hp = 0
             hp_stat = int(base_stats["hp"])
             iv = pokemon["iv"]
             ev = pokemon["ev"]
             level = pokemon["level"]
             max_hp = calculate_hp(hp_stat, level, ev, iv)
             pokemon.pop("hp", None)
-            pokemon["current_hp"] = min(saved_current_hp, int(max_hp))
+
+            raw_current_hp = pokemon.get("current_hp")
+            saved_current_hp = None
+            if raw_current_hp is not None and not isinstance(raw_current_hp, bool):
+                try:
+                    saved_current_hp = max(0, int(raw_current_hp))
+                except (TypeError, ValueError, OverflowError):
+                    saved_current_hp = None
+            if saved_current_hp is None:
+                pokemon["current_hp"] = int(max_hp)
+            else:
+                pokemon["current_hp"] = min(saved_current_hp, int(max_hp))
             pokemon["battle_status"] = "fighting"
             try:
                 pokemon["growth_rate"] = get_growth_rate(int(evo_id))
