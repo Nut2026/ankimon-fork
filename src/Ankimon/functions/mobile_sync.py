@@ -2987,10 +2987,15 @@ def _calculate_mobile_reward(
     )
     from ..pyobj.pokemon_obj import PokemonObject
 
-    try:
-        saved_current_hp = max(0, int(pkmndata.get("current_hp", 0)))
-    except (TypeError, ValueError, OverflowError):
-        saved_current_hp = 0
+    raw_current_hp = pkmndata.get("current_hp")
+    if raw_current_hp is None:
+        raw_current_hp = pkmndata.get("hp")
+    saved_current_hp = None
+    if raw_current_hp is not None and not isinstance(raw_current_hp, bool):
+        try:
+            saved_current_hp = max(0, int(raw_current_hp))
+        except (TypeError, ValueError, OverflowError):
+            saved_current_hp = None
 
     growth_rate = pkmndata.get("growth_rate", "medium-fast")
     level = int(pkmndata.get("level", 1))
@@ -3161,7 +3166,10 @@ def _calculate_mobile_reward(
             if k in ("hp", "atk", "def", "spa", "spd", "spe")
         }
         max_hp = int(pkmndata["stats"].get("hp", 15))
-        pkmndata["current_hp"] = min(saved_current_hp, max_hp)
+        if saved_current_hp is None:
+            pkmndata["current_hp"] = max_hp
+        else:
+            pkmndata["current_hp"] = min(saved_current_hp, max_hp)
 
     friendship = int(pkmndata.get("friendship", 0))
     friendship_gain = random.randint(1, 2) if xp_share else random.randint(5, 9)
@@ -3176,4 +3184,3 @@ def _calculate_mobile_reward(
     )
 
     return messages, learned, pending
-  
