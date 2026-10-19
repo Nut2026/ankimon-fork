@@ -522,9 +522,9 @@ def canonicalize_pokemon_record(
     source of ``current_hp`` (used by the migration and the startup sweep);
     the saved row never contains ``hp`` either way. ``allow_legacy_hp=False``
     (the default, and what every public save/read path uses) ignores ``hp``
-    and only reads ``current_hp`` / ``stats.hp`` — so an in-memory caller that
-    hands ``save_pokemon`` an ``hp``-only record gets a row without HP, which
-    is the documented #975 contract.
+    and only reads ``current_hp`` — so an in-memory caller that hands
+    ``save_pokemon`` an ``hp``-only record gets a row without HP, which is the
+    documented #975 contract.
     """
     return AnkimonDB._canonicalize_pokemon_hp(data, allow_legacy_hp=allow_legacy_hp)
 
@@ -637,20 +637,21 @@ class AnkimonDB:
         value compute it themselves (PokemonObject fills max HP at
         construction); only ``update_pokemon_current_hp`` and
         ``consume_item_and_save_main_pokemon`` may write it.
+
+        ``stats.hp`` is deliberately NOT a source of the *current* value: it is
+        the record's max HP and reading it here would inject ``current_hp:
+        <max>`` into every record that only carried ``stats`` (e.g. the whole
+        migration round-trip and every hand-built test fixture). The legacy
+        source of current HP is the top-level ``hp`` key alone, and only when
+        the caller opts into ``allow_legacy_hp``.
         """
         if not isinstance(data, dict):
             raise TypeError("Pokémon data must be a dictionary")
         result = dict(data)
         current_hp = None
-        keys = (
-            ("current_hp", "hp", "stats")
-            if allow_legacy_hp
-            else ("current_hp", "stats")
-        )
+        keys = ("current_hp", "hp") if allow_legacy_hp else ("current_hp",)
         for key in keys:
             candidate = result.get(key)
-            if key == "stats" and isinstance(candidate, dict):
-                candidate = candidate.get("hp")
             current_hp = cls._hp_integer(candidate)
             if current_hp is not None:
                 break
