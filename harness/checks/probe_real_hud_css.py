@@ -43,7 +43,6 @@ def _seed_valid_active_pokemon(session):
 
     Returns the shared ``individual_id``.
     """
-    from ..pokemon_obj import PokemonObject
 
     reviewer = session.services.reviewer
     main_pokemon = reviewer.main_pokemon
