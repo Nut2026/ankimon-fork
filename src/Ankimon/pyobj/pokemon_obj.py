@@ -141,11 +141,15 @@ class PokemonObject:
         self.held_item = held_item
 
         self.max_hp = self.calculate_max_hp()
-        hp_source: dict = {"level": self.level, "base_stats": self.base_stats,
-                           "iv": self.iv, "ev": self.ev}
+        hp_source: dict = {
+            "level": self.level,
+            "base_stats": self.base_stats,
+            "iv": self.iv,
+            "ev": self.ev,
+        }
         if current_hp is not None:
             hp_source["current_hp"] = current_hp
-        elif hp is not None:
+        if hp is not None:
             hp_source["hp"] = hp
         resolved_hp = canonicalize_pokemon_record(
             hp_source, allow_legacy_hp=True
@@ -517,15 +521,23 @@ class PokemonObject:
 
     def update_stats(self, **kwargs):
         """Update the attributes of the Pokémon object with keyword arguments."""
-        if "hp" in kwargs and "current_hp" not in kwargs:
+        has_hp_kwarg = "hp" in kwargs
+        has_current_hp_kwarg = "current_hp" in kwargs
+        if has_hp_kwarg or has_current_hp_kwarg:
+            hp_source: dict = {}
+            if has_current_hp_kwarg:
+                hp_source["current_hp"] = kwargs["current_hp"]
+            if has_hp_kwarg:
+                hp_source["hp"] = kwargs["hp"]
             resolved = canonicalize_pokemon_record(
-                {k: v for k, v in kwargs.items() if k in ("hp",)},
-                allow_legacy_hp=True,
-            )
-            if "current_hp" in resolved:
-                kwargs = dict(kwargs)
-                kwargs["current_hp"] = resolved["current_hp"]
+                hp_source, allow_legacy_hp=True
+            ).get("current_hp")
+            kwargs = dict(kwargs)
             kwargs.pop("hp", None)
+            if "current_hp" in resolved_keys(resolved) if False else True:
+                pass
+            if resolved is not None or has_current_hp_kwarg or has_hp_kwarg:
+                kwargs["current_hp"] = resolved
         for key, value in kwargs.items():
             if key not in self._WRITABLE_ATTRS:
                 continue
