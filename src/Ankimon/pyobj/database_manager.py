@@ -1036,6 +1036,7 @@ class AnkimonDB:
                         continue
 
                     base_stats = pokemon_data.get("base_stats")
+                    base_stats_changed = False
                     if not is_valid_base_stats(base_stats):
                         base_stats = (
                             search_pokedex(pokemon_data.get("name", ""), "baseStats")
@@ -1043,10 +1044,11 @@ class AnkimonDB:
                         )
                         if is_valid_base_stats(base_stats):
                             pokemon_data["base_stats"] = base_stats
+                            base_stats_changed = True
                     normalized = self._canonicalize_pokemon_hp(
                         pokemon_data, allow_legacy_hp=True
                     )
-                    if normalized != pokemon_data:
+                    if base_stats_changed or normalized != pokemon_data:
                         updates.append((self._obfuscate(normalized), ind_id))
 
                 if updates:
