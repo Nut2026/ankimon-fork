@@ -5,6 +5,7 @@ from typing import Optional
 from ..functions.pokedex_functions import search_pokedex, search_pokedex_by_id
 from ..resources import mainpokemon_path
 from ..pyobj.pokemon_obj import PokemonObject
+from ..pyobj.database_manager import canonicalize_pokemon_record
 from ..services import services
 
 # default values to fall back in case of load error
@@ -31,20 +32,13 @@ MAIN_POKEMON_DEFAULT = {
 
 
 def _normalize_loaded_hp(pokemon_data, max_hp):
-    """Return a safe value from the canonical current_hp field."""
-    for candidate in (
-        pokemon_data.get("current_hp"),
-        max_hp,
-    ):
-        if candidate is None:
-            continue
-        try:
-            current_hp = int(candidate)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        return max(0, min(current_hp, max_hp))
-
-    return max_hp
+    """Resolve current HP, fall back to legacy HP, and clamp it to max HP."""
+    normalized = canonicalize_pokemon_record(
+        pokemon_data, allow_legacy_hp=True
+    ).get("current_hp")
+    if normalized is None:
+        return max_hp
+    return max(0, min(normalized, max_hp))
 
 
 def _apply_loaded_hp(main_pokemon, pokemon_data):
@@ -109,10 +103,6 @@ def update_main_pokemon(main_pokemon: Optional[PokemonObject] = None):
                 main_pokemon_data = json.load(mainpokemon_json)
                 if main_pokemon_data:
                     mainpokemon_empty = False
-                    legacy_record = main_pokemon_data[0]
-                    if legacy_record.get("current_hp") is None:
-                        legacy_record["current_hp"] = legacy_record.get("hp")
-                    legacy_record.pop("hp", None)
                     pokemon_name = search_pokedex_by_id(main_pokemon_data[0]["id"])
                     main_pokemon_data[0]["base_stats"] = search_pokedex(
                         pokemon_name, "baseStats"
