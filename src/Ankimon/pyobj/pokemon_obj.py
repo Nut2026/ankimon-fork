@@ -5,6 +5,7 @@ import os
 from typing import Optional
 
 from ..services import services
+from .database_manager import canonicalize_pokemon_record
 
 # NOTE: give_item is imported lazily inside give_back_held_item() (below) rather
 # than here. utils imports pokedex_functions which imports this module, so a
@@ -134,14 +135,22 @@ class PokemonObject:
             },
         )
         self.volatile_status = set(kwargs.get("volatile_status", []))
-        self.nature = kwargs.get("nature", "serious")
+        self.nature = kwargs.get("nature") or "serious"
+        self.mega = bool(kwargs.get("mega", False))
+        self.special_form = kwargs.get("special_form")
         self.held_item = held_item
 
-        # ``hp`` is accepted only for older callers; persisted data uses
-        # current_hp as the single source of current health.
         self.max_hp = self.calculate_max_hp()
-        initial_hp = current_hp if current_hp is not None else hp
-        self.hp = self._normalize_hp(initial_hp, self.max_hp, self.max_hp)
+        hp_source: dict = {"level": self.level, "base_stats": self.base_stats,
+                           "iv": self.iv, "ev": self.ev}
+        if current_hp is not None:
+            hp_source["current_hp"] = current_hp
+        elif hp is not None:
+            hp_source["hp"] = hp
+        resolved_hp = canonicalize_pokemon_record(
+            hp_source, allow_legacy_hp=True
+        ).get("current_hp")
+        self.hp = self._normalize_hp(resolved_hp, self.max_hp, self.max_hp)
         self.current_hp = self.hp
 
         self.is_favorite = is_favorite
@@ -508,6 +517,15 @@ class PokemonObject:
 
     def update_stats(self, **kwargs):
         """Update the attributes of the Pokémon object with keyword arguments."""
+        if "hp" in kwargs and "current_hp" not in kwargs:
+            resolved = canonicalize_pokemon_record(
+                {k: v for k, v in kwargs.items() if k in ("hp",)},
+                allow_legacy_hp=True,
+            )
+            if "current_hp" in resolved:
+                kwargs = dict(kwargs)
+                kwargs["current_hp"] = resolved["current_hp"]
+            kwargs.pop("hp", None)
         for key, value in kwargs.items():
             if key not in self._WRITABLE_ATTRS:
                 continue
@@ -518,8 +536,6 @@ class PokemonObject:
         raw_current_hp = getattr(self, "current_hp", None)
         if "current_hp" in kwargs:
             current_hp = kwargs["current_hp"]
-        elif "hp" in kwargs:
-            current_hp = kwargs["hp"]
         else:
             current_hp = raw_current_hp
         self.hp = self._normalize_hp(current_hp, self.max_hp, self.max_hp)
@@ -543,11 +559,15 @@ class PokemonObject:
                 self._battle_stats[key] = value
 
     def calculate_max_hp(self):
-        ev, iv = self.ev["hp"], self.iv["hp"]
+        ev, iv = self.ev.get("hp", 0), self.iv.get("hp", 15)
         hp = (
             10
             + self.level
-            + int((2 * self.base_stats["hp"] + iv + int(ev / 4)) * self.level / 100)
+            + int(
+                (2 * self.base_stats.get("hp", 1) + iv + int(ev / 4))
+                * self.level
+                / 100
+            )
         )
         hp = int(hp)
         return hp
