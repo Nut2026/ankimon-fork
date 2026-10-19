@@ -582,9 +582,12 @@ class AnkimonDB:
         if value is None or isinstance(value, bool):
             return None
         try:
-            return int(value)
+            result = int(value)
         except (TypeError, ValueError, OverflowError):
             return None
+        if not isinstance(value, str) and value != result:
+            return None
+        return result
 
     @classmethod
     def _pokemon_max_hp(cls, data):
