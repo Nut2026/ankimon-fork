@@ -17,15 +17,33 @@ from ..pyobj.translator import Translator
 from ..pyobj.test_window import TestWindow
 from ..pyobj.reviewer_obj import Reviewer_Manager
 from ..functions.pokedex_functions import search_pokedex, search_pokedex_by_id
+from ..pyobj.database_manager import canonicalize_pokemon_record
 
 
 def _resolve_persisted_hp(pokemon_data):
-    """Return the saved current HP, preserving zero and rejecting malformed data."""
-    value = pokemon_data.get("current_hp")
-    if value is None or isinstance(value, bool):
+    """Return the saved current HP, preserving zero and rejecting malformed data.
+
+    Delegates to ``canonicalize_pokemon_record(..., allow_legacy_hp=True)`` so
+    this switch path applies the SAME precedence the migration and the DB read
+    path do: a valid ``current_hp`` wins, a valid legacy ``hp`` is the fallback,
+    a malformed ``current_hp`` falls back to a valid ``hp`` (not to max HP), and
+    a record carrying neither yields ``None`` -- which lets ``PokemonObject``
+    fall back to ``max_hp`` only when there is genuinely no persisted value.
+
+    Reading only ``current_hp`` here (the old behaviour) is what full-healed a
+    wounded main on switch: a legacy row with ``hp: 7`` and no ``current_hp``
+    returned ``None``, the constructor got no HP, and ``_normalize_hp(None,
+    max_hp, max_hp)`` produced the max (26).
+    """
+    if not isinstance(pokemon_data, dict):
+        return None
+    resolved = canonicalize_pokemon_record(
+        pokemon_data, allow_legacy_hp=True
+    ).get("current_hp")
+    if resolved is None or isinstance(resolved, bool):
         return None
     try:
-        return int(value)
+        return int(resolved)
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -74,8 +92,8 @@ def MainPokemon(
         logger.log_and_showinfo(
             "error",
             f"Could not save {getattr(main_pokemon, 'name', 'your previous main')} "
-            "before switching, so the switch was cancelled. See the Ankimon log "
-            "for details.",
+            "before switching, so the switch was cancelled. Recent progress may "
+            "be lost. See the Ankimon log for details.",
         )
         return
 
