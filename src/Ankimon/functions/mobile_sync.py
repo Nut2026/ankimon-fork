@@ -2997,6 +2997,8 @@ def _calculate_mobile_reward(
         except (TypeError, ValueError, OverflowError):
             saved_current_hp = None
 
+    pkmndata.pop("hp", None)
+
     growth_rate = pkmndata.get("growth_rate", "medium-fast")
     level = int(pkmndata.get("level", 1))
     xp = int(pkmndata.get("xp", 0))
