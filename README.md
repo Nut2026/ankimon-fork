@@ -43,6 +43,7 @@
       <td align="center" valign="top" width="20%"><a href="https://github.com/Nut2026"><img src="https://github.com/Nut2026.png?s=80" width="80px;" alt="Nut2026"/><br /><sub><b>Nut2026</b></sub></a><br /><a href="https://github.com/h0tp-ftw/ankimon/commits?author=Nut2026" title="Code">💻</a></td>
       <td align="center" valign="top" width="20%"><a href="https://github.com/slager2"><img src="https://github.com/slager2.png?s=80" width="80px;" alt="slager2"/><br /><sub><b>slager2</b></sub></a><br /><a href="https://github.com/h0tp-ftw/ankimon/commits?author=slager2" title="Code">💻</a></td>
       <td align="center" valign="top" width="20%"><a href="https://github.com/JadonKJones"><img src="https://github.com/JadonKJones.png?s=80" width="80px;" alt="JadonKJones"/><br /><sub><b>JadonKJones</b></sub></a><br /><a href="https://github.com/h0tp-ftw/ankimon/commits?author=JadonKJones" title="Code">💻</a></td>
+      <td align="center" valign="top" width="20%"><a href="https://github.com/esakkas24"><img src="https://github.com/esakkas24.png?s=80" width="80px;" alt="esakkas24"/><br /><sub><b>esakkas24</b></sub></a><br /><a href="https://github.com/h0tp-ftw/ankimon/commits?author=esakkas24" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>
@@ -201,10 +202,12 @@ Support my Caffeine Addiction (something that helps building this Addon):
 
 ## Important Notes
 
+- **Startup and automatic dialogs:** Ankimon's background startup checks run independently of Anki's collection work. Startup dialogs, automatic update notifications, and automatic monthly-challenge dialogs wait until an Anki profile is open, Anki's progress indicator has finished, and other modal dialogs have closed. These prompts may therefore appear after startup sync completes.
+- **Mobile & Web Reviews:** After sync, mobile-review detection waits until Anki is idle. If a mobile battle replay is still running or paused, detection retries without blocking the interface. Resume or stop the current replay to let detection continue; open **Ankimon → Mobile & Web Reviews** to resolve pending battles manually.
 - **Linux OS** Before reporting an issue on Linux, make sure you check if it works with the package downloaded directly from the [Anki github](https://github.com/ankitects/anki/releases) as it could be a problem with the package maintained by a third party (distro maintainer or flatpak)
 - **Addon Status:** Ankimon is still in development. Please report any bugs you encounter to help improve the addon.
 - **Backup Files:** Migrating your legacy save now preserves "mypokemon.json" and "mainpokemon.json" and only archives them once the import is verified successful, so a failed or cancelled migration is safe to retry. We still recommend copying these files before updating as an extra precaution. Please check out my GitHub Ankimon Page before updating - I will let you know when an update is coming in.
-- **Backup Manager:** Legacy backups move from `ankimon_backups` beside the add-on to `Ankimon_Backups` in the current Anki profile. If that move is interrupted, Ankimon preserves originals whose copies cannot be verified and protects the migration's recovery copies from deletion; unrelated backups can still be deleted or rotated. Restore and Delete selections remain usable after a backup moves. If migration is running when you select one, try again shortly.
+- **Backup Manager:** Legacy backups move from `ankimon_backups` beside the add-on to `Ankimon_Backups` in the current Anki profile. This archive migration runs in the background without delaying Ankimon's startup readiness; the rolling safety backup still runs before save migration. If that move is interrupted, Ankimon preserves originals whose copies cannot be verified and protects the migration's recovery copies from deletion; unrelated backups can still be deleted or rotated. Restore and Delete selections remain usable after a backup moves. If migration is running when you select one, try again shortly.
 - **Compatibility:** Currently, Ankimon is **only compatible with PyQt6**. Updates for compatibility with other versions will be provided in the future.
 
 ## Screenshots
