@@ -636,15 +636,17 @@ class AnkimonDB:
         verbatim. When the record does carry an HP value but no inputs for a
         real max, the caller's value is preserved (not clamped against a
         fabricated fallback); clamping is only safe when the max is derivable
-        from ``base_stats`` or ``stats.hp``. Callers that need a battle-ready
-        value compute it themselves (PokemonObject fills max HP at
-        construction); only ``update_pokemon_current_hp`` and
+        from a positive ``base_stats.hp``. ``stats.hp`` alone is ambiguous:
+        legacy saves used it for base HP, modern saves for calculated max HP.
+        Callers that need a battle-ready value compute it themselves
+        (PokemonObject fills max HP at construction); only
+        ``update_pokemon_current_hp`` and
         ``consume_item_and_save_main_pokemon`` may write it.
 
-        ``stats.hp`` is deliberately NOT a source of the *current* value: it is
-        the record's max HP and reading it here would inject ``current_hp:
-        <max>`` into every record that only carried ``stats`` (e.g. the whole
-        migration round-trip and every hand-built test fixture). The legacy
+        ``stats.hp`` is deliberately NOT a source of the *current* value:
+        reading it here would inject ``current_hp: <max>`` into every record
+        that only carried ``stats`` (e.g. the migration round-trip and
+        hand-built test fixtures). The legacy
         source of current HP is the top-level ``hp`` key alone, and only when
         the caller opts into ``allow_legacy_hp``.
         """
@@ -661,7 +663,18 @@ class AnkimonDB:
         result.pop("hp", None)
         if current_hp is None:
             return result
-        max_hp = cls._pokemon_max_hp(result)
+        base_stats = result.get("base_stats")
+        base_hp = cls._hp_integer(
+            base_stats.get("hp") if isinstance(base_stats, dict) else None
+        )
+        # Startup preserves rows whose species stats cannot be resolved. A
+        # later getter or metadata edit must not clamp those rows against
+        # legacy stats.hp (base HP), or against an invalid base HP.
+        max_hp = (
+            cls._pokemon_max_hp(result)
+            if base_hp is not None and base_hp > 0
+            else None
+        )
         if max_hp is None:
             result["current_hp"] = max(0, current_hp)
         else:
