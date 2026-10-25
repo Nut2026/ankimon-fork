@@ -248,11 +248,6 @@ class Reviewer_Manager:
             self._last_state = None
             return
 
-        if int(self.settings.get("gui.show_mainpkmn_in_reviewer")) == 3:
-            reviewer.web.eval("if(window.__ankimonHud) window.__ankimonHud.clear();")
-            self._last_state = None
-            return
-
         enemy_hp, enemy_max_hp = self._safe_hp_pair(
             self.enemy_pokemon.hp, self.enemy_pokemon.max_hp
         )
@@ -323,6 +318,12 @@ class Reviewer_Manager:
 
         if saved and individual_id:
             self._persist_live_hp(individual_id, saved, main_hp, main_max)
+
+        # Hidden HUDs still need to save damage before another UI reloads HP.
+        if int(self.settings.get("gui.show_mainpkmn_in_reviewer")) == 3:
+            reviewer.web.eval("if(window.__ankimonHud) window.__ankimonHud.clear();")
+            self._last_state = None
+            return
 
         main_hp, main_max_hp = self._safe_hp_pair(main_hp, main_max)
 

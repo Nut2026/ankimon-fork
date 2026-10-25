@@ -297,6 +297,40 @@ def test_card_object_guard_blocks_hook_calls():
     assert db.query_count == 0
 
 
+@pytest.mark.parametrize("live_hp", [7, 0])
+def test_hidden_hud_refresh_persists_live_hp_without_rendering(live_hp):
+    db = FakeDB(pokemon={"individual_id": "main", "current_hp": 19})
+    db._pokemon_max_hp = lambda data: 20
+
+    def save_hp(individual_id, hp):
+        assert individual_id == "main"
+        db._pokemon["current_hp"] = hp
+        return True
+
+    db.update_pokemon_current_hp = MagicMock(side_effect=save_hp)
+    fake_services = types.SimpleNamespace(
+        db=db, settings=None, reviewer=None, logger=MagicMock()
+    )
+    mod, mgr = _new_manager(fake_services)
+    mgr.settings.values["gui.show_mainpkmn_in_reviewer"] = 3
+    mgr.main_pokemon.individual_id = "main"
+    mgr.main_pokemon.hp = mgr.main_pokemon.current_hp = live_hp
+    mgr._last_state = ("previously visible",)
+    reviewer = mod.mw.reviewer
+    reviewer.web.eval.reset_mock()
+
+    mgr.refresh_hud()
+
+    assert db.get_main_pokemon()["current_hp"] == live_hp
+    db.update_pokemon_current_hp.assert_called_once_with("main", live_hp)
+    assert mgr.main_pokemon.hp == mgr.main_pokemon.current_hp == live_hp
+    reviewer.web.eval.assert_called_once_with(
+        "if(window.__ankimonHud) window.__ankimonHud.clear();"
+    )
+    assert mgr._last_state is None
+    assert db.query_count == 0
+
+
 # --------------------------------------------------------------------------- #
 # reviewer_ui: team-cycle + hotkeys + idempotent wrapping
 # --------------------------------------------------------------------------- #
