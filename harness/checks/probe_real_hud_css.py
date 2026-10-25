@@ -109,22 +109,9 @@ def _seed_valid_active_pokemon(session):
     main_pokemon.current_hp = seeded_hp
 
     db = session.services.db
-    saved_ok = False
-    for save_name in ("save_pokemon", "upsert_pokemon", "save_captured_pokemon"):
-        save = getattr(db, save_name, None)
-        if callable(save):
-            try:
-                save(saved_row)
-                saved_ok = True
-                break
-            except Exception:
-                continue
-    if not saved_ok:
-        try:
-            db.save_pokemon_to_db(saved_row)
-            saved_ok = True
-        except Exception:
-            saved_ok = False
+    assert db.save_pokemon(saved_row), (
+        "probe fixture: seeding the active Pokémon failed"
+    )
 
     fetched = db.get_pokemon(str(individual_id))
     assert fetched is not None, (

@@ -702,6 +702,61 @@ def _bind_main_pokemon(state, main_pokemon):
     return state
 
 
+class _ItemOnlyHealingMutator(StateMutator):
+    """Exclude player healing during lookahead as well as final application.
+
+    The engine applies and reverses candidate instructions while calculating
+    later moves. Both directions must ignore the same heals, otherwise HP-based
+    damage is calculated against HP that the player will never receive.
+    """
+
+    def __init__(self, state):
+        super().__init__(state)
+        self.apply_instructions[constants.MUTATOR_HEAL] = self._apply_heal
+        self.reverse_instructions[constants.MUTATOR_HEAL] = self._reverse_heal
+        self.apply_instructions[constants.MUTATOR_DAMAGE] = self._apply_damage
+        self.reverse_instructions[constants.MUTATOR_DAMAGE] = self._reverse_damage
+
+    def _apply_heal(self, side, amount):
+        if side != constants.USER or amount <= 0:
+            self.heal(side, amount)
+
+    def _reverse_heal(self, side, amount):
+        if side != constants.USER or amount <= 0:
+            self.damage(side, amount)
+
+    def _apply_damage(self, side, amount):
+        # Pain Split can represent recovery as negative damage to its target.
+        if side != constants.USER or amount >= 0:
+            self.damage(side, amount)
+
+    def _reverse_damage(self, side, amount):
+        if side != constants.USER or amount >= 0:
+            self.heal(side, amount)
+
+
+def sync_active_pokemon_hp(state, main_pokemon):
+    """Publish committed HP to this individual's battle without resetting it."""
+    individual_id = getattr(main_pokemon, "individual_id", None)
+    if (
+        state is None
+        or individual_id is None
+        or str(getattr(state, "_ankimon_main_individual_id", None))
+        != str(individual_id)
+    ):
+        return False
+    try:
+        max_hp = int(main_pokemon.max_hp)
+        current_hp = int(main_pokemon.current_hp)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if max_hp < 1:
+        return False
+    state.user.active.maxhp = max_hp
+    state.user.active.hp = max(0, min(current_hp, max_hp))
+    return True
+
+
 def sync_active_pokemon_stats(state, main_pokemon):
     """Apply committed training to this individual's ongoing battle in place.
 
@@ -940,7 +995,7 @@ def simulate_battle_with_poke_engine(
                     f"Wrong mutator_full_reset encountered : {mutator_full_reset}"
                 )
 
-        mutator = StateMutator(state)
+        mutator = _ItemOnlyHealingMutator(state)
 
         if settings_obj and settings_obj.get("battle.review_based_damage"):
             mutator.review_based_damage_multiplier = (
@@ -996,9 +1051,12 @@ def simulate_battle_with_poke_engine(
             instr
             for instr in instrs
             if not (
-                instr[0] == constants.MUTATOR_HEAL
+                instr[0] in (constants.MUTATOR_HEAL, constants.MUTATOR_DAMAGE)
                 and instr[1] == constants.USER
-                and instr[2] > 0
+                and (
+                    (instr[0] == constants.MUTATOR_HEAL and instr[2] > 0)
+                    or (instr[0] == constants.MUTATOR_DAMAGE and instr[2] < 0)
+                )
             )
         ]
 

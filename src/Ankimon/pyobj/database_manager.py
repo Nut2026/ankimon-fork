@@ -683,6 +683,9 @@ class AnkimonDB:
 
     def _normalize_captured_pokemon_hp(self):
         """Migrate legacy duplicate HP fields and clamp saved current HP."""
+        from .legacy_migration import LegacyMigration
+
+        prepare_legacy_hp = LegacyMigration(self, {}).prepare_legacy_pokemon
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
@@ -692,9 +695,13 @@ class AnkimonDB:
                 data = self._deobfuscate(raw_data)
                 if not isinstance(data, dict):
                     continue
-                normalized = self._canonicalize_pokemon_hp(
-                    data, allow_legacy_hp=True
-                )
+                try:
+                    normalized = prepare_legacy_hp(data)
+                except ValueError as exc:
+                    self._log(
+                        "warning", f"Preserved unresolved HP for {individual_id}: {exc}"
+                    )
+                    continue
                 if normalized != data:
                     updates.append((self._obfuscate(normalized), individual_id))
             if updates:
@@ -1945,43 +1952,59 @@ class AnkimonDB:
         return None
 
     def update_pokemon_current_hp(self, individual_id: str, current_hp: int) -> bool:
-        """Persist only the current HP of an existing collection record."""
+        """Patch HP under write intent, refusing busy or caller-owned writes.
+
+        Reviewer repaints must not wait for a mobile reward transaction. A
+        refused save can be retried later without replacing newer reward data.
+        """
         if not isinstance(individual_id, str) or not individual_id:
             return False
         hp = self._hp_integer(current_hp)
         if hp is None:
             raise ValueError("current_hp must be an integer")
 
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                "SELECT data FROM captured_pokemon WHERE individual_id = ?",
-                (individual_id,),
-            )
-            row = cursor.fetchone()
-            if row is None:
+        with self.lease_connection() as conn:
+            raw = conn._conn
+            if raw.in_transaction or conn._disable_commit:
                 return False
-            data = self._deobfuscate(row["data"])
-            if not isinstance(data, dict):
-                raise ValueError(f"Invalid saved Pokémon data for {individual_id}")
-            data = self._canonicalize_pokemon_hp(data)
-            max_hp = self._pokemon_max_hp(data)
-            if max_hp is None:
-                data["current_hp"] = max(0, hp)
-            else:
-                data["current_hp"] = max(0, min(hp, max_hp))
-            cursor.execute(
-                "UPDATE captured_pokemon SET data = ? WHERE individual_id = ?",
-                (self._obfuscate(data), individual_id),
-            )
-            conn.commit()
-            return cursor.rowcount == 1
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            cursor.close()
+            timeout = raw.execute("PRAGMA busy_timeout").fetchone()[0]
+            started = False
+            try:
+                raw.execute("PRAGMA busy_timeout=0")
+                raw.execute("BEGIN IMMEDIATE")
+                started = True
+                with contextlib.closing(raw.cursor()) as cursor:
+                    row = cursor.execute(
+                        "SELECT data FROM captured_pokemon WHERE individual_id = ?",
+                        (individual_id,),
+                    ).fetchone()
+                    if row is None:
+                        return False
+                    data = self._deobfuscate(row["data"])
+                    if not isinstance(data, dict):
+                        raise ValueError(
+                            f"Invalid saved Pokémon data for {individual_id}"
+                        )
+                    data = self._canonicalize_pokemon_hp(data)
+                    max_hp = self._pokemon_max_hp(data)
+                    data["current_hp"] = max(
+                        0, hp if max_hp is None else min(hp, max_hp)
+                    )
+                    cursor.execute(
+                        "UPDATE captured_pokemon SET data = ? WHERE individual_id = ?",
+                        (self._obfuscate(data), individual_id),
+                    )
+                raw.commit()
+                started = False
+                return True
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                    return False
+                raise
+            finally:
+                if started:
+                    raw.rollback()
+                raw.execute(f"PRAGMA busy_timeout={int(timeout)}")
 
     def set_main_pokemon(self, individual_id: str) -> bool:
         """Sets a pokemon as the main pokemon by individual_id. Returns False if pokemon not found."""

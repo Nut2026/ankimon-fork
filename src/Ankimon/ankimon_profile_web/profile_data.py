@@ -821,10 +821,13 @@ class ProfileData:
             services.db.save_team(team_data)
             if companion_id:
                 active = services.main_pokemon
-                if active is not None and getattr(active, "individual_id", None):
-                    stored = services.db.get_pokemon(str(active.individual_id)) or {}
-                    if not services.db.save_pokemon(
-                        {**stored, **active.to_dict()}
+                if (
+                    active is not None
+                    and getattr(active, "individual_id", None)
+                    and services.db.get_main_pokemon()
+                ):
+                    if not services.db.update_pokemon_current_hp(
+                        str(active.individual_id), active.current_hp
                     ):
                         raise RuntimeError(
                             "Could not save the active Pokémon before switching"

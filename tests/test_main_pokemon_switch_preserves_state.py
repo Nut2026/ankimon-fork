@@ -59,6 +59,12 @@ class _FakeDB:
         self.saved_party.append(data)
         return True
 
+    def update_pokemon_current_hp(self, individual_id, hp):
+        assert self._main["individual_id"] == individual_id
+        self._main = {**self._main, "current_hp": hp}
+        self.saved_party.append(dict(self._main))
+        return True
+
 
 def _make_module(name, **attrs):
     mod = types.ModuleType(name)
@@ -362,7 +368,7 @@ def test_outgoing_save_failure_is_shown_to_the_player(collection_dialog):
     cannot know to go and re-check their old main.
     """
     class _BoomDB(_FakeDB):
-        def save_pokemon(self, data):
+        def update_pokemon_current_hp(self, individual_id, hp):
             raise RuntimeError("disk on fire")
 
     PokemonObject = collection_dialog._PokemonObject
@@ -511,3 +517,35 @@ def test_hud_refresh_and_grid_refresh_are_triggered(collection_dialog):
 
     reviewer_obj.refresh_hud.assert_called_once_with()
     collection_dialog._singletons.pokemon_pc.refresh_pokemon_grid.assert_called_once_with()
+
+
+def test_pc_switch_preserves_newer_stored_attacks_and_metadata(collection_dialog):
+    db = _FakeDB(
+        existing_main={
+            "individual_id": "outgoing-uuid",
+            "attacks": ["tackle", "thunderbolt"],
+            "custom_metadata": {"retained": True},
+        }
+    )
+    _call(collection_dialog, _stored_pokemon(), db=db)
+    assert db.saved_party[0]["attacks"] == ["tackle", "thunderbolt"]
+    assert db.saved_party[0]["custom_metadata"] == {"retained": True}
+
+
+def test_reselect_main_preserves_live_hp_and_refreshes_saved_moves(collection_dialog):
+    stored = _stored_pokemon(current_hp=100, hp=100, attacks=["psychic", "recover"])
+    main = collection_dialog._PokemonObject(**stored, base_stats=dict(_BASE_STATS))
+    main.hp = main.current_hp = 40
+    main.attacks = ["psychic"]
+    db = _FakeDB(existing_main=dict(stored))
+    collection_dialog.mw.ankimon_db = db
+    test_window = MagicMock()
+    test_window.isVisible.return_value = False
+
+    collection_dialog.MainPokemon(
+        stored, main, MagicMock(), MagicMock(), MagicMock(), test_window
+    )
+
+    assert main.hp == main.current_hp == 40
+    assert db.saved_main[-1]["current_hp"] == 40
+    assert main.attacks == ["psychic", "recover"]

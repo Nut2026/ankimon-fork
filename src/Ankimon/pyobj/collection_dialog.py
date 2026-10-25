@@ -70,17 +70,17 @@ def MainPokemon(
         return
 
     db = mw.ankimon_db
-    
-    # --- Save the existing mainpokemon to mypokemon before replacing ---
-    # Persist the OUTGOING main's IN-MEMORY state (xp, friendship, current_hp
-    # gained during reviews) rather than the stale on-disk copy returned by
-    # db.get_main_pokemon(). At this point ``main_pokemon`` still references the
-    # current main; it is only overwritten with the new selection further below.
+
+    # Save combat HP without replacing newer stored moves, rewards, or metadata.
     try:
-        # Only save if there's already an active main pokemon to replace.
-        if main_pokemon is not None and getattr(main_pokemon, "individual_id", None) and db.get_main_pokemon():
-            # Use main_pokemon.to_dict() to capture in-memory stats like xp.
-            if not db.save_pokemon(main_pokemon.to_dict()):
+        if (
+            main_pokemon is not None
+            and getattr(main_pokemon, "individual_id", None)
+            and db.get_main_pokemon()
+        ):
+            if not db.update_pokemon_current_hp(
+                str(main_pokemon.individual_id), main_pokemon.current_hp
+            ):
                 raise RuntimeError("The outgoing Pokémon was not saved")
     except Exception as exc:
         # Do not switch away from an active Pokémon whose latest state was not saved.
@@ -96,6 +96,14 @@ def MainPokemon(
             "be lost. See the Ankimon log for details.",
         )
         return
+
+    # The PC read this snapshot before the outgoing save above. Re-selecting
+    # the same individual must retain its live HP when a busy HUD save had
+    # left the snapshot behind, while still refreshing its stored moves.
+    if pokemon_data.get("individual_id") and str(pokemon_data["individual_id"]) == str(
+        getattr(main_pokemon, "individual_id", None)
+    ):
+        pokemon_data = {**pokemon_data, "current_hp": main_pokemon.current_hp}
 
     # --- Now proceed to set the new mainpokemon as before ---
     pokemon_id = pokemon_data.get("id")

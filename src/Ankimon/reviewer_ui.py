@@ -139,8 +139,10 @@ def cycle_team_pokemon():
             from .battle_loop import _cancel_main_faint_deferral
 
             outgoing_id = getattr(main_pokemon, "individual_id", None)
-            if outgoing_id:
-                if not services.db.save_pokemon(main_pokemon.to_dict()):
+            if outgoing_id and services.db.get_main_pokemon():
+                if not services.db.update_pokemon_current_hp(
+                    str(outgoing_id), main_pokemon.current_hp
+                ):
                     tooltip("Could not save the active Pokémon; switch cancelled.")
                     return
 

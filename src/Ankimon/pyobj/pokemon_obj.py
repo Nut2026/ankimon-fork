@@ -534,10 +534,7 @@ class PokemonObject:
             ).get("current_hp")
             kwargs = dict(kwargs)
             kwargs.pop("hp", None)
-            if "current_hp" in resolved_keys(resolved) if False else True:
-                pass
-            if resolved is not None or has_current_hp_kwarg or has_hp_kwarg:
-                kwargs["current_hp"] = resolved
+            kwargs["current_hp"] = resolved
         for key, value in kwargs.items():
             if key not in self._WRITABLE_ATTRS:
                 continue

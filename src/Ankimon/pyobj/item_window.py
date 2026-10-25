@@ -489,14 +489,15 @@ class ItemWindow(QWidget):
                 if not self.main_pokemon:
                     return {"ok": False, "message": "No active Pokémon to heal."}
                 hp_heal = self.hp_heal_items[name]
-                # Report what actually happened: Check_Heal_Item declines when
-                # the bag turns out to be empty (a stale web list, a double
-                # click), and claiming a heal that never happened would leave
-                # the HP the toast promised nowhere to be found.
+                # Healing can be refused for HP, inventory, or save failures.
+                # Check_Heal_Item reports the specific reason to the player.
                 if not self.Check_Heal_Item(
                     self.main_pokemon.name, hp_heal, name, self.achievements
                 ):
-                    return {"ok": False, "message": f"No {name} left in your bag."}
+                    return {
+                        "ok": False,
+                        "message": f"Could not use {name}. No item was consumed.",
+                    }
                 return {
                     "ok": True,
                     "message": f"Healed {self.main_pokemon.name} with {name}.",
@@ -909,6 +910,25 @@ class ItemWindow(QWidget):
             )
             return False
 
+        # A busy background writer can defer the HUD's HP save. Flush the live
+        # value before using saved HP as the potion's starting point, or damage
+        # since the last successful repaint would become an extra free heal.
+        try:
+            if not db.update_pokemon_current_hp(
+                str(individual_id), self.main_pokemon.current_hp
+            ):
+                raise RuntimeError("Current battle HP could not be saved")
+            expected = db.get_main_pokemon()
+            if not expected or str(expected.get("individual_id")) != str(individual_id):
+                raise RuntimeError("The active Pokémon changed")
+        except Exception as exc:
+            self.logger.log("error", f"Could not save current battle HP: {exc}")
+            self.logger.log_and_showinfo(
+                "error",
+                "Could not save current HP; no item was used. Please try again.",
+            )
+            return False
+
         try:
             current_hp = int(expected.get("current_hp"))
         except (TypeError, ValueError, OverflowError):
@@ -968,6 +988,15 @@ class ItemWindow(QWidget):
         self.main_pokemon.hp = healed_hp
         self.main_pokemon.current_hp = healed_hp
         self.main_pokemon.max_hp = max_hp
+
+        # Keep an ongoing encounter's engine state aligned with the committed heal.
+        try:
+            from ..battle_loop import _state
+            from ..functions.ankimon_hooks_to_poke_engine import sync_active_pokemon_hp
+
+            sync_active_pokemon_hp(_state.new_state, self.main_pokemon)
+        except Exception as exc:
+            self.logger.log("warning", f"Could not refresh healed battle HP: {exc}")
 
         # Existing reviewer HUD code updates the Shadow-DOM HUD through eval;
         # this repaints it immediately without requiring a reviewer reload.

@@ -23,6 +23,7 @@ the real aqt-free registry so ``services.db`` can be pointed at a fake.
 """
 
 import importlib.util
+import sqlite3
 import sys
 import types
 from pathlib import Path
@@ -111,6 +112,12 @@ class _FakeItemDB:
 
     def get_main_pokemon(self):
         return dict(self.main_pokemon) if self.main_pokemon else None
+
+    def update_pokemon_current_hp(self, individual_id, hp):
+        if not self.main_pokemon or self.main_pokemon["individual_id"] != individual_id:
+            return False
+        self.main_pokemon["current_hp"] = hp
+        return True
 
     def _pokemon_max_hp(self, data):
         return data["stats"]["hp"]
@@ -581,6 +588,41 @@ def test_the_heal_path_spends_one_real_row_per_heal(item_window_mod, real_db):
 
     assert win.Check_Heal_Item("mewtwo", 20, "potion", {}) is False
     assert pokemon.hp == 50, "the third click healed out of an empty bag"
+
+
+def test_potion_retries_unsaved_battle_hp_without_spending_while_busy(
+    item_window_mod, real_db
+):
+    real_db.save_item(17, "potion", 1)
+    pokemon = _FakePokemon(hp=90, max_hp=100)
+    win = _make_window(item_window_mod, real_db, pokemon)
+    pokemon.hp = pokemon.current_hp = 40
+    blocker = sqlite3.connect(str(real_db.db_path))
+    try:
+        blocker.execute("BEGIN IMMEDIATE")
+        assert not real_db.update_pokemon_current_hp(pokemon.individual_id, 40)
+        assert not win.Check_Heal_Item("mewtwo", 20, "potion", {})
+        assert pokemon.hp == 40
+        assert real_db.get_item("potion")["quantity"] == 1
+        blocker.rollback()
+        assert win.Check_Heal_Item("mewtwo", 20, "potion", {})
+        assert pokemon.hp == pokemon.current_hp == 60
+        assert real_db.get_main_pokemon()["current_hp"] == 60
+        assert real_db.get_item("potion") is None
+    finally:
+        blocker.close()
+
+
+def test_potion_cannot_revive_live_faint_with_stale_saved_hp(item_window_mod, real_db):
+    real_db.save_item(17, "potion", 1)
+    pokemon = _FakePokemon(hp=30, max_hp=100)
+    win = _make_window(item_window_mod, real_db, pokemon)
+    pokemon.hp = pokemon.current_hp = 0
+
+    assert not win.Check_Heal_Item("mewtwo", 20, "potion", {})
+    assert pokemon.hp == pokemon.current_hp == 0
+    assert real_db.get_main_pokemon()["current_hp"] == 0
+    assert real_db.get_item("potion")["quantity"] == 1
 
 
 @pytest.mark.parametrize("quantity", [1, 3])

@@ -60,6 +60,21 @@ class _FakeDB:
         self._row = incoming_row
         self.saved_main = []
         self.saved_party = []
+        self.outgoing = {
+            "individual_id": "outgoing-uuid",
+            "current_hp": 99,
+            "attacks": ["tackle", "thunderbolt"],
+            "xp": 123,
+            "custom_metadata": {"retained": True},
+        }
+
+    def update_pokemon_current_hp(self, individual_id, hp):
+        assert individual_id == self.outgoing["individual_id"]
+        self.outgoing["current_hp"] = hp
+        return True
+
+    def get_main_pokemon(self):
+        return dict(self.outgoing)
 
     def get_team(self):
         return [{"individual_id": "outgoing-uuid"}, {"individual_id": "incoming-uuid"}]
@@ -73,6 +88,7 @@ class _FakeDB:
         return True
 
     def save_pokemon(self, data):
+        self.outgoing = dict(data)
         self.saved_party.append(data)
         return True
 
@@ -254,3 +270,12 @@ def test_cycle_resolves_incoming_hp_like_the_loader(team_cycle, hp_fields, expec
     assert main.hp == main.current_hp == expected_hp
     assert saved["current_hp"] == expected_hp
     assert "hp" not in saved
+
+
+def test_cycle_saves_hp_without_erasing_newer_stored_progress(team_cycle):
+    _cycle(team_cycle, current_hp=7)
+    outgoing = team_cycle[1].db.outgoing
+    assert outgoing["current_hp"] == _OUTGOING_HP
+    assert outgoing["attacks"] == ["tackle", "thunderbolt"]
+    assert outgoing["xp"] == 123
+    assert outgoing["custom_metadata"] == {"retained": True}

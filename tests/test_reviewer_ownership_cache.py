@@ -69,6 +69,12 @@ class FakeDB:
         self.get_pokemon_args.append(individual_id)
         return self._pokemon
 
+    def get_main_pokemon(self):
+        return self._pokemon
+
+    def update_pokemon_current_hp(self, individual_id, hp):
+        return True
+
     def save_pokemon(self, data):
         return True
 
